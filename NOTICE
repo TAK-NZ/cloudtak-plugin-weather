@@ -1,0 +1,20 @@
+cloudtak-plugin-weather
+
+This plugin is licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+
+The plugin imports src/std.ts from the CloudTAK app (lib/host.ts), so the built
+CloudTAK web bundle that includes it is a combined work under AGPL-3.0.
+
+Third-party material
+
+lib/icon.ts contains the "cloud-sun" icon (solid) from Font Awesome Free 7.3.1:
+  Project: https://fontawesome.com
+  Author:  @fontawesome
+  License: CC BY 4.0, https://fontawesome.com/license/free
+  Changes: inlined as a Vue component
+Distributions of builds that include lib/icon.ts must carry this notice.
+
+lib/MenuTemplate.vue is copied from dfpc-coe/cloudtak-plugin-sample:
+  Project: https://github.com/dfpc-coe/cloudtak-plugin-sample
+  License: MIT
+  Copyright (c) 2026 State of Colorado - DFPC - Center of Excellence
