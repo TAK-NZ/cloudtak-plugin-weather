@@ -1,0 +1,13 @@
+{
+  "name": "cloudtak-plugin-weather",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "CloudTAK plugin: rain, radar and cloud layers with a rain forecast slider",
+  "license": "AGPL-3.0-only",
+  "main": "index.ts",
+  "scripts": {
+    "lint": "cd ../.. && npx eslint --config eslint.config.js plugins/cloudtak-plugin-weather",
+    "check": "cd ../.. && npx vue-tsc",
+    "test": "cd ../.. && npx vitest run plugins/cloudtak-plugin-weather"
+  }
+}
