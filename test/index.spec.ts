@@ -377,3 +377,90 @@ describe('layers', () => {
         expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
     });
 });
+
+describe('tile URL failures', () => {
+    const wxLayers = (map: EventedFakeMap): string[] => map.layers.filter((l) => l.id.startsWith('taknz-wx-')).map((l) => l.id);
+    const warnings = (): string[] => vi.mocked(console.warn).mock.calls.map((c) => c.map(String).join(' '));
+
+    async function running(map: EventedFakeMap) {
+        toggleLayer('clouds', true);
+        toggleLayer('radars', true);
+        const { instance } = await install(map);
+        await instance.enable();
+        await plugin?.pending;
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-clouds', 'taknz-wx-radars']));
+        vi.mocked(console.warn).mockClear();
+    }
+
+    it('healthy path: no warning, a layer that is switched off is removed', async () => {
+        const map = new EventedFakeMap();
+        await running(map);
+        toggleLayer('clouds', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-radars']));
+        expect(warnings()).toEqual([]);
+    });
+
+    it('a token read failure still removes a layer the user switched off, and keeps the others', async () => {
+        const map = new EventedFakeMap();
+        await running(map);
+        const before = map.sources.get('taknz-wx-radars-src')?.tiles[0];
+        host.token.mockImplementation(async () => {
+            throw new Error('secret-session-value');
+        });
+
+        toggleLayer('clouds', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-radars']));
+        expect(map.sources.get('taknz-wx-radars-src')?.tiles[0]).toBe(before);
+
+        const messages = warnings();
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatch(/Could not read the session token \(TokenUnavailableError\)/);
+        expect(messages[0]).not.toMatch(/secret-session-value|tok-1|Invalid weather request/);
+
+        // The same failure is reported once per activation
+        toggleLayer('radars', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual([]));
+        expect(warnings()).toHaveLength(1);
+    });
+
+    it('a missing token is reported as a token problem', async () => {
+        const map = new EventedFakeMap();
+        await running(map);
+        host.token.mockImplementation(async () => undefined);
+        toggleLayer('clouds', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-radars']));
+        expect(warnings()).toHaveLength(1);
+        expect(warnings()[0]).toMatch(/session token/);
+    });
+
+    it('an invalid request is reported as such, not as a token problem', async () => {
+        const map = new EventedFakeMap();
+        await running(map);
+        const before = map.sources.get('taknz-wx-radars-src')?.tiles[0];
+
+        // A snapshot that is not a multiple of 600 makes tileRequest throw a RangeError
+        session.snapshot = 1234;
+        await vi.waitFor(() => expect(warnings()).toHaveLength(1));
+        expect(warnings()[0]).toMatch(/Invalid weather request \(RangeError: Invalid snapshot: 1234\)/);
+        expect(warnings()[0]).not.toMatch(/session token|tok-1/);
+        expect(wxLayers(map)).toEqual(['taknz-wx-clouds', 'taknz-wx-radars']);
+
+        toggleLayer('clouds', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-radars']));
+        expect(map.sources.get('taknz-wx-radars-src')?.tiles[0]).toBe(before);
+        expect(warnings()).toHaveLength(1);
+    });
+
+    it('recovers when the token comes back', async () => {
+        const map = new EventedFakeMap();
+        await running(map);
+        host.token.mockImplementation(async () => undefined);
+        toggleLayer('clouds', false);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-radars']));
+
+        host.token.mockImplementation(async () => 'tok-9');
+        toggleLayer('clouds', true);
+        await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-clouds', 'taknz-wx-radars']));
+        expect(map.sources.get('taknz-wx-clouds-src')?.tiles[0]).toContain('token=tok-9');
+    });
+});

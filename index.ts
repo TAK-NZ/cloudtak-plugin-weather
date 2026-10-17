@@ -8,9 +8,9 @@ import WeatherSettings from './lib/WeatherSettings.vue';
 import { IconWeather } from './lib/icon.ts';
 import { host } from './lib/host.ts';
 import { BOTTOM_KEY, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
-import { fetchStatus, tileTemplate } from './lib/relay-client.ts';
+import { TokenUnavailableError, fetchStatus, tileTemplate } from './lib/relay-client.ts';
 import type { StatusReason } from './lib/relay-client.ts';
-import { LayerStack, SLOT_ORDER, computeDesired, requestsFor } from './lib/layers.ts';
+import { LayerStack, SLOT_ORDER, computeDesired, isSelected, requestFor } from './lib/layers.ts';
 import type { MapLike } from './lib/layers.ts';
 import { HealthMonitor } from './lib/health.ts';
 import type { MapErrorLike } from './lib/health.ts';
@@ -43,7 +43,8 @@ interface Activation {
     applied: Partial<Record<LayerSlot, string>>;
     /** A tile-URL change was held back because the relay is unhealthy. */
     queued: boolean;
-    tokenWarned: boolean;
+    /** Kinds of tile-URL failures already reported, so each is logged once per activation. */
+    warned: Set<string>;
     lastStatusAt: number;
     lastIdleAt: number;
     rollover?: ReturnType<typeof setTimeout>;
@@ -123,7 +124,7 @@ export default class WeatherPlugin implements PluginInstance {
             }),
             applied: {},
             queued: false,
-            tokenWarned: false,
+            warned: new Set(),
             lastStatusAt: Date.now(),
             lastIdleAt: 0,
             intervals: [],
@@ -289,21 +290,26 @@ export default class WeatherPlugin implements PluginInstance {
         const seq = ++act.seq;
 
         let tiles: Partial<Record<LayerSlot, string>> = {};
-        try {
-            const wanted = requestsFor(settings, session);
-            for (const slot of SLOT_ORDER) {
-                const req = wanted[slot];
+        // A slot whose URL cannot be built keeps what is on the map; every other slot is
+        // still applied, so a layer the user switched off is removed regardless.
+        const failed: Partial<Record<LayerSlot, unknown>> = {};
+        for (const slot of SLOT_ORDER) {
+            try {
+                const req = requestFor(slot, settings, session);
                 if (req) tiles[slot] = await tileTemplate(host, req);
+            } catch (err) {
+                failed[slot] = err;
             }
-        } catch {
-            if (!act.tokenWarned) {
-                act.tokenWarned = true;
-                console.warn('[weather] Could not read the session token; weather layers not updated');
-            }
-            return;
         }
 
         if (act.dead || seq !== act.seq || !act.stack) return;
+
+        for (const slot of SLOT_ORDER) {
+            if (!(slot in failed)) continue;
+            this.warnOnce(act, failed[slot]);
+            const old = act.applied[slot];
+            if (old !== undefined && isSelected(slot, settings)) tiles[slot] = old;
+        }
 
         const changed = SLOT_ORDER.some((s) => tiles[s] !== undefined && tiles[s] !== act.applied[s]);
         if (changed && !force && !act.monitor.gate()) {
@@ -324,6 +330,21 @@ export default class WeatherPlugin implements PluginInstance {
             act.applied = { ...tiles };
         } catch (err) {
             console.error('[weather] Could not update the weather layers', err);
+        }
+    }
+
+    /** Say once per activation why the tile URLs could not be built. Never prints a token. */
+    private warnOnce(act: Activation, err: unknown): void {
+        const name = err instanceof Error ? err.name : typeof err;
+        if (act.warned.has(name)) return;
+        act.warned.add(name);
+
+        if (err instanceof TokenUnavailableError) {
+            console.warn(`[weather] Could not read the session token (${name}); weather layers not updated`);
+        } else if (err instanceof RangeError) {
+            console.warn(`[weather] Invalid weather request (${name}: ${err.message}); the affected layers are not updated`);
+        } else {
+            console.warn(`[weather] Could not build the weather tile URLs (${name}); the affected layers are not updated`);
         }
     }
 

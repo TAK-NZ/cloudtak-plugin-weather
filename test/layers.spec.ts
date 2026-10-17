@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-    SLOT_ORDER, layerId, sourceId, markerAnchor, planBeforeId, requestsFor, computeDesired, LayerStack,
+    SLOT_ORDER, layerId, sourceId, markerAnchor, planBeforeId, requestsFor, requestFor, computeDesired, LayerStack,
     type DesiredLayer, type RasterLayerSpec, type RasterSourceSpec,
 } from '../lib/layers.ts';
 import { buildTileTemplate } from '../lib/relay-client.ts';
@@ -195,6 +195,14 @@ describe('requestsFor and computeDesired', () => {
         s.clouds = true;
         const d = computeDesired(s, { frame: 0, snapshot: SNAP }, {});
         expect(d[0].on).toBe(false);
+    });
+
+    it('requestFor throws a RangeError for an invalid snapshot, computeDesired does not', () => {
+        const s = defaultSettings();
+        s.clouds = true;
+        expect(() => requestFor('clouds', s, { frame: 0, snapshot: 1234 })).toThrow(RangeError);
+        expect(requestFor('radars', s, { frame: 0, snapshot: 1234 })).toBeNull();
+        expect(() => computeDesired(s, { frame: 0, snapshot: 1234 }, {})).not.toThrow();
     });
 });
 

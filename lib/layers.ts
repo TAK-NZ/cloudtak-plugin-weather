@@ -84,27 +84,47 @@ export function planBeforeId(slot: LayerSlot, present: ReadonlySet<LayerSlot>, a
     return anchor;
 }
 
+/** Whether the user switched the slot on. Never throws. */
+export function isSelected(slot: LayerSlot, settings: WeatherSettings): boolean {
+    if (slot === 'clouds') return settings.clouds;
+    if (slot === 'precip') return settings.precip !== 'none';
+    return settings.radars;
+}
+
+/**
+ * The relay request for one slot, or null when it is switched off.
+ * Throws a RangeError when the settings do not make a valid request.
+ */
+export function requestFor(slot: LayerSlot, settings: WeatherSettings, session: Pick<Session, 'frame' | 'snapshot'>): TileRequest | null {
+    const snapshot = session.snapshot;
+
+    if (slot === 'clouds') return settings.clouds ? tileRequest('clouds', { snapshot }) : null;
+    if (slot === 'precip') {
+        return settings.precip === 'none' ? null : tileRequest(settings.precip, {
+            color: settings.palette.precip,
+            forecast: frameToMinutes(session.frame),
+            snapshot,
+            coverage: settings.coverage,
+        });
+    }
+    if (!settings.radars) return null;
+    return tileRequest('radars', {
+        color: settings.palette.radars,
+        snapshot,
+        coverage: settings.coverage,
+        usePrecipType: settings.radarsPrecipType,
+    });
+}
+
 /**
  * The relay request for each slot that is switched on (null = off).
  * Only the rain request carries the forecast frame; clouds and radar show current data.
  */
 export function requestsFor(settings: WeatherSettings, session: Pick<Session, 'frame' | 'snapshot'>): Record<LayerSlot, TileRequest | null> {
-    const snapshot = session.snapshot;
-
     return {
-        clouds: settings.clouds ? tileRequest('clouds', { snapshot }) : null,
-        precip: settings.precip === 'none' ? null : tileRequest(settings.precip, {
-            color: settings.palette.precip,
-            forecast: frameToMinutes(session.frame),
-            snapshot,
-            coverage: settings.coverage,
-        }),
-        radars: settings.radars ? tileRequest('radars', {
-            color: settings.palette.radars,
-            snapshot,
-            coverage: settings.coverage,
-            usePrecipType: settings.radarsPrecipType,
-        }) : null,
+        clouds: requestFor('clouds', settings, session),
+        precip: requestFor('precip', settings, session),
+        radars: requestFor('radars', settings, session),
     };
 }
 
@@ -117,13 +137,11 @@ export function computeDesired(
     session: Pick<Session, 'frame' | 'snapshot'>,
     tileUrls: Partial<Record<LayerSlot, string>>
 ): DesiredLayer[] {
-    const wanted = requestsFor(settings, session);
-
     return SLOT_ORDER.map((slot) => {
         const tiles = tileUrls[slot];
         return {
             slot,
-            on: wanted[slot] !== null && typeof tiles === 'string' && tiles !== '',
+            on: isSelected(slot, settings) && typeof tiles === 'string' && tiles !== '',
             tiles: tiles ?? '',
             opacity: settings.opacity[slot],
             tileSize: settings.tileSize,

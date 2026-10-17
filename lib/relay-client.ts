@@ -84,11 +84,25 @@ export function buildTileTemplate(origin: string, req: TileRequest, token: strin
     return `${origin}${TILE_PATH}?${pairs.join('&')}`;
 }
 
+/** The session token could not be read (not signed in, or the host refused). */
+export class TokenUnavailableError extends Error {
+    constructor(message: string, options?: { cause?: unknown }) {
+        super(message, options);
+        this.name = 'TokenUnavailableError';
+    }
+}
+
 /**
  * Tile URL template with a freshly read session token.
+ * Throws TokenUnavailableError when there is no token.
  */
 export async function tileTemplate(host: Host, req: TileRequest): Promise<string> {
-    const token = await host.token();
-    if (!token) throw new Error('Not signed in');
+    let token: string | undefined;
+    try {
+        token = await host.token();
+    } catch (err) {
+        throw new TokenUnavailableError('Token unavailable', { cause: err });
+    }
+    if (!token) throw new TokenUnavailableError('Not signed in');
     return buildTileTemplate(host.origin(), req, token);
 }
