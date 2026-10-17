@@ -6,13 +6,15 @@ import MenuTemplate from './lib/MenuTemplate.vue';
 import WeatherBar from './lib/WeatherBar.vue';
 import WeatherSettings from './lib/WeatherSettings.vue';
 import { IconWeather } from './lib/icon.ts';
+import { WeatherControl } from './lib/control.ts';
+import type { ControlHost } from './lib/control.ts';
 import { host } from './lib/host.ts';
 import { BOTTOM_KEY, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
 import { TokenUnavailableError, fetchStatus, tileTemplate } from './lib/relay-client.ts';
 import type { StatusReason } from './lib/relay-client.ts';
 import { LayerStack, SLOT_ORDER, computeDesired, isSelected, requestFor } from './lib/layers.ts';
 import type { MapLike } from './lib/layers.ts';
-import { HealthMonitor } from './lib/health.ts';
+import { HealthMonitor, healthMessage } from './lib/health.ts';
 import type { MapErrorLike } from './lib/health.ts';
 import { session, setFrame, settings } from './lib/state.ts';
 import { applyServerTime, clock, rolloverJitterMs, snapshotAt } from './lib/time.ts';
@@ -36,7 +38,8 @@ interface Activation {
     dead: boolean;
     /** Bumped by every sync and by teardown; a result with an older number is discarded. */
     seq: number;
-    map?: MapLike;
+    map?: MapLike & Partial<ControlHost>;
+    control?: WeatherControl;
     stack?: LayerStack;
     monitor: HealthMonitor;
     /** Tile URLs currently on the map, per slot. */
@@ -162,11 +165,20 @@ export default class WeatherPlugin implements PluginInstance {
             });
             act.registered.menu = true;
 
-            this.api.bottomBar.add({ key: BOTTOM_KEY, component: WeatherBar });
-            act.registered.bar = true;
-
-            const map = this.api.map as unknown as MapLike & Partial<EventedMap>;
+            const map = this.api.map as unknown as MapLike & Partial<EventedMap> & ControlHost;
             act.map = map;
+
+            // The toggle is a map control. MapLibre appends its element only after onAdd()
+            // returns, so place() has to run after addControl() (see WeatherControl).
+            const control = new WeatherControl({
+                onToggle: () => {
+                    session.panelOpen = !session.panelOpen;
+                },
+            });
+            act.control = control;
+            map.addControl(control, 'top-left');
+            control.place();
+
             act.stack = new LayerStack(map);
 
             this.listen(act, map);
@@ -222,6 +234,14 @@ export default class WeatherPlugin implements PluginInstance {
     }
 
     private start(act: Activation): void {
+        act.stops.push(watch(() => session.panelOpen, (open) => this.setBar(act, open), { flush: 'sync' }));
+        act.stops.push(watch(
+            [() => settings.clouds, () => settings.radars, () => settings.precip, () => session.panelOpen, () => session.health],
+            () => this.refreshControl(act),
+            { flush: 'sync' }
+        ));
+        this.refreshControl(act);
+
         act.stops.push(watch(
             [settings, () => session.frame],
             () => {
@@ -246,6 +266,30 @@ export default class WeatherPlugin implements PluginInstance {
             document.addEventListener('visibilitychange', onVisible);
             act.stops.push(() => document.removeEventListener('visibilitychange', onVisible));
         }
+    }
+
+    /** The bottom bar item exists only while the panel is open. */
+    private setBar(act: Activation, open: boolean): void {
+        if (act.dead || open === act.registered.bar) return;
+        try {
+            if (open) this.api.bottomBar.add({ key: BOTTOM_KEY, component: WeatherBar });
+            else this.api.bottomBar.remove(BOTTOM_KEY);
+            act.registered.bar = open;
+        } catch (err) {
+            console.warn('[weather] Could not update the weather bar', err);
+        }
+    }
+
+    /** Keep the control's pressed state, dot and tooltip in line with the session. */
+    private refreshControl(act: Activation): void {
+        const control = act.control;
+        if (act.dead || !control) return;
+        const open = session.panelOpen;
+        const anyLayer = settings.clouds || settings.radars || settings.precip !== 'none';
+        const message = healthMessage(session.health);
+        control.setOpen(open);
+        control.setActive(!open && anyLayer);
+        control.setTitle(message ? `Weather: ${message}` : 'Weather');
     }
 
     /** Pick up a new 10-minute snapshot (after a random delay) and retry held changes. */
@@ -377,6 +421,13 @@ export default class WeatherPlugin implements PluginInstance {
         } catch {
             // The map is gone, so are the layers.
         }
+        try {
+            if (act.control) act.map?.removeControl?.(act.control);
+        } catch {
+            // The map is gone, and with it MapLibre's reference to the control.
+        }
+        act.control?.destroy();
+        act.control = undefined;
         if (act.registered.bar) {
             try {
                 this.api.bottomBar.remove(BOTTOM_KEY);

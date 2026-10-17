@@ -14,6 +14,7 @@ vi.mock('../lib/host.ts', () => hostMock);
 
 import WeatherPlugin from '../index.ts';
 import { bindStorage, session, setFrame, toggleLayer, setPrecip } from '../lib/state.ts';
+import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
 import { EventedFakeMap, deferred, jsonResponse, makeFakeApi, statusBody } from './helpers.ts';
 
 const host = hostMock.host;
@@ -35,6 +36,8 @@ async function install(map: EventedFakeMap | Error = new EventedFakeMap()) {
     return { ...fake, instance };
 }
 
+const controlEl = (): HTMLElement | null => document.querySelector(`.${CONTROL_CLASS}`);
+const controlButton = (): HTMLButtonElement | null => document.querySelector(`.${CONTROL_CLASS} button`);
 const tileUrls = (map: EventedFakeMap): string[] => [...map.sources.values()].flatMap((s) => s.tiles);
 
 beforeEach(() => {
@@ -56,6 +59,7 @@ beforeEach(() => {
 afterEach(async () => {
     await plugin?.disable();
     plugin = undefined;
+    document.body.replaceChildren();
     vi.restoreAllMocks();
 });
 
@@ -74,15 +78,16 @@ describe('lifecycle', () => {
         expect(host.fetch).not.toHaveBeenCalled();
     });
 
-    it('registers route, menu item and bottom bar when the relay is ok', async () => {
-        const { instance, calls } = await install();
+    it('registers route, menu item and the map control, but no bottom bar, when the relay is ok', async () => {
+        const map = new EventedFakeMap();
+        const { instance, calls } = await install(map);
         await instance.enable();
         await plugin?.pending;
         expect(calls).toEqual([
             'routes.add:home-menu-plugin-weather:home-menu',
             'menu.add:weather',
-            'bottomBar.add:taknz-weather',
         ]);
+        expect(map.controls.map((c) => c.position)).toEqual(['top-left']);
         expect(host.fetch).toHaveBeenCalledTimes(1);
         expect(host.fetch.mock.calls[0][0]).toBe(STATUS_URL);
     });
@@ -112,6 +117,9 @@ describe('lifecycle', () => {
         expect(map.counters.addSource).toBe(0);
         expect(map.counters.addLayer).toBe(0);
         expect(map.listenerCount()).toBe(0);
+        expect(map.controls).toEqual([]);
+        expect(controlEl()).toBeNull();
+        expect(document.getElementById(CONTROL_STYLE_ID)).toBeNull();
         expect(host.fetch).toHaveBeenCalledTimes(1);
         expect(host.fetch.mock.calls.every((c) => c[0] === STATUS_URL)).toBe(true);
     });
@@ -174,7 +182,7 @@ describe('lifecycle', () => {
         await secondPending;
         expect(calls.filter((c) => c.startsWith('menu.add'))).toHaveLength(1);
         expect(calls.filter((c) => c.startsWith('routes.add'))).toHaveLength(1);
-        expect(calls.filter((c) => c.startsWith('bottomBar.add'))).toHaveLength(1);
+        expect(calls.filter((c) => c.startsWith('bottomBar.add'))).toHaveLength(0);
     });
 
     it('enable after enable tears down the previous registration first', async () => {
@@ -186,14 +194,12 @@ describe('lifecycle', () => {
         expect(calls).toEqual([
             'routes.add:home-menu-plugin-weather:home-menu',
             'menu.add:weather',
-            'bottomBar.add:taknz-weather',
-            'bottomBar.remove:taknz-weather',
             'menu.remove:weather',
             'router.removeRoute:home-menu-plugin-weather',
             'routes.add:home-menu-plugin-weather:home-menu',
             'menu.add:weather',
-            'bottomBar.add:taknz-weather',
         ]);
+        expect(document.querySelectorAll(`.${CONTROL_CLASS}`)).toHaveLength(1);
     });
 
     it('disable removes everything, is idempotent and removes the map listeners', async () => {
@@ -210,10 +216,10 @@ describe('lifecycle', () => {
         await instance.disable();
 
         expect(calls).toEqual([
-            'bottomBar.remove:taknz-weather',
             'menu.remove:weather',
             'router.removeRoute:home-menu-plugin-weather',
         ]);
+        expect(map.controls).toEqual([]);
         expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
         expect([...map.sources.keys()].some((id) => id.startsWith('taknz-wx-'))).toBe(false);
         expect(map.listenerCount()).toBe(0);
@@ -228,10 +234,28 @@ describe('lifecycle', () => {
 
         await expect(fake.instance.disable()).resolves.toBeUndefined();
         expect(fake.calls).toEqual([
+            'menu.remove:weather',
+            'router.removeRoute:home-menu-plugin-weather',
+        ]);
+        expect(controlEl()).toBeNull();
+        expect(document.getElementById(CONTROL_STYLE_ID)).toBeNull();
+    });
+
+    it('disable still removes the control and the open bar item when api.map throws', async () => {
+        const fake = await install(new EventedFakeMap());
+        await fake.instance.enable();
+        await plugin?.pending;
+        session.panelOpen = true;
+        fake.setMap(new Error('Map destroyed'));
+        fake.calls.length = 0;
+
+        await fake.instance.disable();
+        expect(fake.calls).toEqual([
             'bottomBar.remove:taknz-weather',
             'menu.remove:weather',
             'router.removeRoute:home-menu-plugin-weather',
         ]);
+        expect(controlEl()).toBeNull();
     });
 
     it('rolls back when api.map throws during enable', async () => {
@@ -241,12 +265,157 @@ describe('lifecycle', () => {
         expect(calls).toEqual([
             'routes.add:home-menu-plugin-weather:home-menu',
             'menu.add:weather',
-            'bottomBar.add:taknz-weather',
-            'bottomBar.remove:taknz-weather',
             'menu.remove:weather',
             'router.removeRoute:home-menu-plugin-weather',
         ]);
+        expect(controlEl()).toBeNull();
         expect(console.error).toHaveBeenCalled();
+    });
+});
+
+describe('weather control and bottom bar', () => {
+    async function running(map = new EventedFakeMap()) {
+        const fake = await install(map);
+        await fake.instance.enable();
+        await plugin?.pending;
+        fake.calls.length = 0;
+        return { map, ...fake };
+    }
+
+    it('adds exactly one control to top-left per enable, placed in the column', async () => {
+        const map = new EventedFakeMap();
+        const column = document.createElement('div');
+        column.className = 'cloudtak-ctrl-group';
+        map.shell.append(column);
+        const { instance } = await running(map);
+
+        expect(map.controls).toHaveLength(1);
+        expect(map.controls[0].position).toBe('top-left');
+        expect(controlEl()?.parentElement).toBe(column);
+
+        await instance.enable();
+        await plugin?.pending;
+        expect(map.controls).toHaveLength(1);
+        expect(document.querySelectorAll(`.${CONTROL_CLASS}`)).toHaveLength(1);
+    });
+
+    it('opening registers the bar once, closing removes it, repeats are idempotent', async () => {
+        const { calls } = await running();
+
+        session.panelOpen = true;
+        session.panelOpen = true;
+        expect(calls).toEqual(['bottomBar.add:taknz-weather']);
+
+        session.panelOpen = false;
+        session.panelOpen = false;
+        expect(calls).toEqual(['bottomBar.add:taknz-weather', 'bottomBar.remove:taknz-weather']);
+
+        session.panelOpen = true;
+        session.panelOpen = false;
+        expect(calls.filter((c) => c.startsWith('bottomBar.add'))).toHaveLength(2);
+        expect(calls.filter((c) => c.startsWith('bottomBar.remove'))).toHaveLength(2);
+    });
+
+    it('a click on the control flips the panel and the pressed state', async () => {
+        const { calls } = await running();
+        controlButton()?.click();
+        expect(session.panelOpen).toBe(true);
+        expect(controlButton()?.getAttribute('aria-pressed')).toBe('true');
+        expect(calls).toEqual(['bottomBar.add:taknz-weather']);
+
+        controlButton()?.click();
+        expect(session.panelOpen).toBe(false);
+        expect(controlButton()?.getAttribute('aria-pressed')).toBe('false');
+        expect(calls).toEqual(['bottomBar.add:taknz-weather', 'bottomBar.remove:taknz-weather']);
+    });
+
+    it('closing the panel keeps the weather layers on the map', async () => {
+        toggleLayer('clouds', true);
+        const map = new EventedFakeMap();
+        await running(map);
+        await vi.waitFor(() => expect(map.layers.some((l) => l.id === 'taknz-wx-clouds')).toBe(true));
+
+        session.panelOpen = true;
+        session.panelOpen = false;
+        await flushPromises();
+        expect(map.layers.some((l) => l.id === 'taknz-wx-clouds')).toBe(true);
+    });
+
+    it('disable removes the control, its style and the open bar item', async () => {
+        const map = new EventedFakeMap();
+        const { instance, calls } = await running(map);
+        session.panelOpen = true;
+        calls.length = 0;
+
+        await instance.disable();
+        expect(calls).toContain('bottomBar.remove:taknz-weather');
+        expect(map.controls).toEqual([]);
+        expect(controlEl()).toBeNull();
+        expect(document.getElementById(CONTROL_STYLE_ID)).toBeNull();
+        expect(session.panelOpen).toBe(false);
+    });
+
+    it('re-enable adds a fresh control that starts closed', async () => {
+        const map = new EventedFakeMap();
+        const { instance, calls } = await running(map);
+        session.panelOpen = true;
+        await instance.disable();
+
+        calls.length = 0;
+        await instance.enable();
+        await plugin?.pending;
+        expect(map.controls).toHaveLength(1);
+        expect(document.querySelectorAll(`.${CONTROL_CLASS}`)).toHaveLength(1);
+        expect(controlButton()?.getAttribute('aria-pressed')).toBe('false');
+        expect(calls.some((c) => c.startsWith('bottomBar'))).toBe(false);
+
+        calls.length = 0;
+        session.panelOpen = true;
+        expect(calls).toEqual(['bottomBar.add:taknz-weather']);
+    });
+
+    it('refreshStatus finding the relay disabled removes the control', async () => {
+        const map = new EventedFakeMap();
+        setPrecip('precip');
+        await running(map);
+        await vi.waitFor(() => expect(map.counters.addLayer).toBe(1));
+
+        reply(200, statusBody({ enabled: false, layers: [] }));
+        map.emit('error', { sourceId: 'taknz-wx-precip-src', error: { status: 403 } });
+
+        await vi.waitFor(() => expect(controlEl()).toBeNull());
+        expect(map.controls).toEqual([]);
+    });
+
+    it('shows the dot only while closed with a layer on', async () => {
+        await running();
+        const dot = (): HTMLElement | null => document.querySelector('.taknz-wx-dot');
+        expect(dot()?.style.display).toBe('none');
+
+        toggleLayer('clouds', true);
+        expect(dot()?.style.display).toBe('');
+
+        session.panelOpen = true;
+        expect(dot()?.style.display).toBe('none');
+
+        session.panelOpen = false;
+        expect(dot()?.style.display).toBe('');
+
+        toggleLayer('clouds', false);
+        expect(dot()?.style.display).toBe('none');
+
+        setPrecip('precip');
+        expect(dot()?.style.display).toBe('');
+    });
+
+    it('puts the relay health in the tooltip, not in the accessible name', async () => {
+        await running();
+        expect(controlButton()?.title).toBe('Weather');
+        session.health = { kind: 'degraded', since: 0, status: 502 };
+        expect(controlButton()?.title).toBe('Weather: Weather service unavailable');
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather');
+        session.health = { kind: 'ok' };
+        expect(controlButton()?.title).toBe('Weather');
     });
 });
 
@@ -287,7 +456,6 @@ describe('layers', () => {
         expect(fake.calls).toEqual([
             'routes.add:home-menu-plugin-weather:home-menu',
             'menu.add:weather',
-            'bottomBar.add:taknz-weather',
         ]);
         await vi.waitFor(() => expect(second.layers.filter((l) => l.id.startsWith('taknz-wx-')).map((l) => l.id))
             .toEqual(['taknz-wx-clouds', 'taknz-wx-precip']));

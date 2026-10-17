@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type { PluginAPI } from '@tak-ps/cloudtak';
 import type { Host } from '../lib/types.ts';
+import type { ControlMapLike, IControlLike } from '../lib/control.ts';
 import { FakeMap } from './fake-map.ts';
 
 export { FakeMap };
@@ -10,6 +11,43 @@ type Listener = (e: unknown) => void;
 /** FakeMap plus the MapLibre event API (on/off/emit). */
 export class EventedFakeMap extends FakeMap {
     handlers = new Map<string, Set<Listener>>();
+    controls: { control: IControlLike; position: string }[] = [];
+    /** `.map-shell > div(map container) > .maplibregl-ctrl-top-left`, as in CloudTAK. */
+    shell = document.createElement('div');
+    container = document.createElement('div');
+    topLeft = document.createElement('div');
+
+    constructor(...args: ConstructorParameters<typeof FakeMap>) {
+        super(...args);
+        this.shell.className = 'map-shell';
+        this.topLeft.className = 'maplibregl-ctrl-top-left';
+        this.container.append(this.topLeft);
+        this.shell.append(this.container);
+        document.body.append(this.shell);
+    }
+
+    getContainer(): HTMLElement {
+        return this.container;
+    }
+
+    /** Like MapLibre: onAdd() first, then the returned element is appended. */
+    addControl(control: IControlLike, position = 'top-right'): this {
+        const el = control.onAdd(this as unknown as ControlMapLike);
+        this.topLeft.append(el);
+        this.controls.push({ control, position });
+        return this;
+    }
+
+    removeControl(control: IControlLike): this {
+        control.onRemove(this as unknown as ControlMapLike);
+        this.controls = this.controls.filter((c) => c.control !== control);
+        return this;
+    }
+
+    /** Drop the fixture from the document. */
+    dispose(): void {
+        this.shell.remove();
+    }
 
     on(type: string, fn: Listener): this {
         if (!this.handlers.has(type)) this.handlers.set(type, new Set());
