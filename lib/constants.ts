@@ -16,3 +16,4 @@ export const ATTRIBUTION = 'Weather data provided by <a href="https://rainbow.ai
 export const API_VERSIONS_SUPPORTED: readonly number[] = [1];
 
 export const PALETTES: readonly PaletteCode[] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'dbz_u8'];
+export const FORECAST_NOTE = 'Clouds and radar always show the current data. Forecast applies to rain only.';

@@ -5,6 +5,16 @@ export const PAUSE_MS = 60_000;
 export const BURST_WINDOW_MS = 10_000;
 export const BURST_COUNT = 5;
 
+/** The text shown to the user for a health state ('' when ok). */
+export function healthMessage(s: HealthState): string {
+    switch (s.kind) {
+        case 'ok': return '';
+        case 'limited': return 'Rate limited, retrying';
+        case 'denied': return s.status === 401 ? 'Session expired: reload CloudTAK' : 'Weather is disabled by an administrator';
+        case 'degraded': return s.status === 400 || s.status === 404 ? 'Weather unavailable' : 'Weather service unavailable';
+    }
+}
+
 /** What the caller should do in response to a map error. */
 export type HealthAction = 'none' | 'refresh-token' | 'refetch-status';
 
@@ -45,13 +55,7 @@ export class HealthMonitor {
     }
 
     message(): string {
-        const s = this.current;
-        switch (s.kind) {
-            case 'ok': return '';
-            case 'limited': return 'Rate limited, retrying';
-            case 'denied': return s.status === 401 ? 'Session expired: reload CloudTAK' : 'Weather is disabled by an administrator';
-            case 'degraded': return s.status === 400 || s.status === 404 ? 'Weather unavailable' : 'Weather service unavailable';
-        }
+        return healthMessage(this.current);
     }
 
     private set(next: HealthState, retryAt: number): void {
