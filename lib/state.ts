@@ -2,7 +2,7 @@ import { reactive } from 'vue';
 import type {
     LayerSlot, PaletteCode, PrecipMode, RelayStatus, HealthState, StorageLike, TimeZoneSetting, WeatherSettings,
 } from './types.ts';
-import { PALETTES, STORAGE_KEY } from './constants.ts';
+import { PALETTES, SETTINGS_VERSION, STORAGE_KEY } from './constants.ts';
 import { clampFrame, clock, debounce, snapshotAt } from './time.ts';
 
 const PRECIP_MODES: readonly PrecipMode[] = ['none', 'precip', 'precip-global'];
@@ -13,12 +13,12 @@ const SAVE_DELAY_MS = 300;
 
 export function defaultSettings(): WeatherSettings {
     return {
-        version: 1,
+        version: SETTINGS_VERSION,
         precip: 'none',
         clouds: false,
         radars: false,
         opacity: { clouds: 0.5, precip: 0.7, radars: 0.7 },
-        palette: { precip: '0', radars: '0' },
+        palette: { precip: '4', radars: '4' },
         coverage: false,
         radarsPrecipType: false,
         tileSize: 512,
@@ -46,34 +46,46 @@ function opacity(v: unknown, fallback: number): number {
     return typeof v === 'number' && Number.isFinite(v) ? clampOpacity(v) : fallback;
 }
 
+interface Stored {
+    settings: WeatherSettings;
+    /** True when an older (version 1 or unversioned) object was upgraded and should be written back. */
+    migrated: boolean;
+}
+
 /**
  * Read and sanitise stored settings. Any non-string result of getItem (null, or
  * undefined as the test stub returns) counts as absent; anything unusable gives defaults.
+ * A missing or 1 version is an old object: it is sanitised and migrated to the current
+ * version. Version 2 is current. Any other version gives defaults.
  */
-export function loadSettings(storage: StorageLike | null | undefined): WeatherSettings {
+function readStored(from: StorageLike | null | undefined): Stored {
     const d = defaultSettings();
+    const fallback: Stored = { settings: d, migrated: false };
 
     let raw: unknown;
     try {
-        raw = storage ? storage.getItem(STORAGE_KEY) : undefined;
+        raw = from ? from.getItem(STORAGE_KEY) : undefined;
     } catch {
-        return d;
+        return fallback;
     }
-    if (typeof raw !== 'string') return d;
+    if (typeof raw !== 'string') return fallback;
 
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
     } catch {
-        return d;
+        return fallback;
     }
-    if (!isRecord(parsed) || parsed.version !== 1) return d;
+    if (!isRecord(parsed)) return fallback;
+
+    const old = parsed.version === undefined || parsed.version === 1;
+    if (!old && parsed.version !== SETTINGS_VERSION) return fallback;
 
     const op = isRecord(parsed.opacity) ? parsed.opacity : {};
     const pal = isRecord(parsed.palette) ? parsed.palette : {};
 
-    return {
-        version: 1,
+    const out: WeatherSettings = {
+        version: SETTINGS_VERSION,
         precip: oneOf(parsed.precip, PRECIP_MODES, d.precip),
         clouds: bool(parsed.clouds, d.clouds),
         radars: bool(parsed.radars, d.radars),
@@ -91,6 +103,21 @@ export function loadSettings(storage: StorageLike | null | undefined): WeatherSe
         tileSize: oneOf(parsed.tileSize, [256, 512] as const, d.tileSize),
         timeZone: oneOf(parsed.timeZone, TIME_ZONES, d.timeZone),
     };
+
+    if (old) {
+        // Version 1 defaulted both palettes to '0'. Move those to the new default '4'.
+        // Accepted trade-off: a '0' the user chose on purpose under version 1 cannot be
+        // told apart from the old default, so it is migrated too. Version 2 keeps '0'.
+        if (pal.precip === '0') out.palette.precip = '4';
+        if (pal.radars === '0') out.palette.radars = '4';
+    }
+
+    return { settings: out, migrated: old };
+}
+
+/** Read and sanitise stored settings, migrating older versions in memory. */
+export function loadSettings(storage: StorageLike | null | undefined): WeatherSettings {
+    return readStored(storage).settings;
 }
 
 function browserStorage(): StorageLike | null {
@@ -103,8 +130,21 @@ function browserStorage(): StorageLike | null {
 
 let storage: StorageLike | null = browserStorage();
 
+/** Write migrated settings straight away (not debounced), so the migration runs once. */
+function persistMigrated(to: StorageLike | null, value: WeatherSettings): void {
+    if (!to) return;
+    try {
+        to.setItem(STORAGE_KEY, JSON.stringify(value));
+    } catch {
+        // Quota exceeded or private mode: the settings still load from memory.
+    }
+}
+
+const initial = readStored(storage);
+if (initial.migrated) persistMigrated(storage, initial.settings);
+
 /** Persisted user settings (module singleton, survives pane unmount/remount). */
-export const settings = reactive<WeatherSettings>(loadSettings(storage));
+export const settings = reactive<WeatherSettings>(initial.settings);
 
 export interface Session {
     panelOpen: boolean;
@@ -140,7 +180,9 @@ const save = debounce(() => {
 export function bindStorage(next: StorageLike | null): void {
     save.cancel();
     storage = next;
-    Object.assign(settings, loadSettings(storage));
+    const loaded = readStored(storage);
+    if (loaded.migrated) persistMigrated(storage, loaded.settings);
+    Object.assign(settings, loaded.settings);
 }
 
 export function flushSave(): void {

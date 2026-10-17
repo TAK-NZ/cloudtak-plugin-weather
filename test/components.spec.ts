@@ -9,6 +9,7 @@ vi.mock('vue-router', () => ({ useRouter: () => routerMock }));
 import LayerControls from '../lib/LayerControls.vue';
 import ForecastSlider from '../lib/ForecastSlider.vue';
 import WeatherBar from '../lib/WeatherBar.vue';
+import WeatherSettings from '../lib/WeatherSettings.vue';
 import { bindStorage, session, setFrame, setPrecip, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
 import { ROUTE_NAME } from '../lib/constants.ts';
 import type { HealthState } from '../lib/types.ts';
@@ -215,6 +216,17 @@ describe('ForecastSlider', () => {
         wrapper = mount(ForecastSlider);
         expect(wrapper.findAll('button').some((b) => /play/i.test(b.text() + (b.attributes('aria-label') ?? '')))).toBe(false);
         expect(wrapper.html()).not.toMatch(/play/i);
+    });
+});
+
+describe('WeatherSettings', () => {
+    it('shows Palette 4 selected for Rain and Radar on fresh settings', () => {
+        wrapper = mount(WeatherSettings);
+        for (const slot of ['precip', 'radars']) {
+            const select = wrapper.get(`[data-test=palette-${slot}]`).element as HTMLSelectElement;
+            expect(select.value).toBe('4');
+            expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Palette 4');
+        }
     });
 });
 

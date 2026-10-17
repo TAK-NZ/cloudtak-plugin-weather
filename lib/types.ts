@@ -5,7 +5,7 @@ export type PaletteCode = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | 
 export type TimeZoneSetting = 'Pacific/Auckland' | 'UTC' | 'local';
 
 export interface WeatherSettings {
-    version: 1;
+    version: 2;
     precip: PrecipMode;
     clouds: boolean;
     radars: boolean;

@@ -5,6 +5,8 @@ export const ROUTE_NAME = 'home-menu-plugin-weather';
 export const ROUTE_PATH = 'plugin-weather';
 export const BOTTOM_KEY = 'taknz-weather';
 export const STORAGE_KEY = 'taknz-weather:v1';
+/** Schema version of the stored settings object (the storage key is unchanged). */
+export const SETTINGS_VERSION = 2;
 export const ID_PREFIX = 'taknz-wx-';
 
 export const STATUS_PATH = '/api/weather/status';

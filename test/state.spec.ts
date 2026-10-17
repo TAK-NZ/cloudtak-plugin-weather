@@ -30,12 +30,12 @@ afterEach(() => {
 describe('defaults', () => {
     it('are all layers off, 512 tiles and New Zealand time', () => {
         expect(defaultSettings()).toEqual({
-            version: 1,
+            version: 2,
             precip: 'none',
             clouds: false,
             radars: false,
             opacity: { clouds: 0.5, precip: 0.7, radars: 0.7 },
-            palette: { precip: '0', radars: '0' },
+            palette: { precip: '4', radars: '4' },
             coverage: false,
             radarsPrecipType: false,
             tileSize: 512,
@@ -65,9 +65,21 @@ describe('loadSettings', () => {
         expect(loadSettings(memory('null'))).toEqual(defaultSettings());
     });
 
-    it('returns defaults for an unknown or missing version', () => {
-        expect(loadSettings(stored({ ...defaultSettings(), version: 2, clouds: true }))).toEqual(defaultSettings());
-        expect(loadSettings(stored({ clouds: true }))).toEqual(defaultSettings());
+    it('returns defaults for an unknown version', () => {
+        expect(loadSettings(stored({ ...defaultSettings(), version: 3, clouds: true }))).toEqual(defaultSettings());
+        expect(loadSettings(stored({ ...defaultSettings(), version: '2', clouds: true }))).toEqual(defaultSettings());
+        expect(loadSettings(stored({ ...defaultSettings(), version: null, clouds: true }))).toEqual(defaultSettings());
+        expect(loadSettings(stored({ ...defaultSettings(), version: NaN, clouds: true }))).toEqual(defaultSettings());
+    });
+
+    it('treats an object with no version as old and migrates it', () => {
+        const out = loadSettings(stored({ clouds: true, palette: { precip: '0', radars: '0' } }));
+        expect(out).toEqual({ ...defaultSettings(), clouds: true });
+        expect(out.version).toBe(2);
+    });
+
+    it('gives palette 4 for Rain and Radar on fresh storage', () => {
+        expect(loadSettings(memory()).palette).toEqual({ precip: '4', radars: '4' });
     });
 
     it('keeps valid stored values', () => {
@@ -93,13 +105,71 @@ describe('loadSettings', () => {
     it('treats a string-typed tile size or palette number as invalid', () => {
         const out = loadSettings(stored({ version: 1, tileSize: '256', palette: { precip: 3 } }));
         expect(out.tileSize).toBe(512);
-        expect(out.palette.precip).toBe('0');
+        expect(out.palette.precip).toBe('4');
     });
 
     it('keeps valid fields next to invalid ones', () => {
         const out = loadSettings(stored({ version: 1, clouds: true, precip: 'nonsense' }));
         expect(out.clouds).toBe(true);
         expect(out.precip).toBe('none');
+    });
+});
+
+describe('settings migration', () => {
+    const v1 = (o: Record<string, unknown>) => memory(JSON.stringify({ ...defaultSettings(), version: 1, ...o }));
+
+    it('moves palette 0 to 4 and keeps every other field', () => {
+        const store = v1({
+            palette: { precip: '0', radars: '0' }, clouds: true, opacity: { clouds: 0.5, precip: 0.3, radars: 0.7 }, tileSize: 256,
+        });
+        expect(loadSettings(store)).toEqual({
+            ...defaultSettings(),
+            clouds: true,
+            opacity: { clouds: 0.5, precip: 0.3, radars: 0.7 },
+            palette: { precip: '4', radars: '4' },
+            tileSize: 256,
+            version: 2,
+        });
+    });
+
+    it('migrates each slot on its own', () => {
+        expect(loadSettings(v1({ palette: { precip: '0', radars: '2' } })).palette).toEqual({ precip: '4', radars: '2' });
+        expect(loadSettings(v1({ palette: { precip: '3', radars: '0' } })).palette).toEqual({ precip: '3', radars: '4' });
+    });
+
+    it('leaves non-zero chosen palettes untouched', () => {
+        expect(loadSettings(v1({ palette: { precip: '3', radars: 'dbz_u8' } })).palette).toEqual({ precip: '3', radars: 'dbz_u8' });
+    });
+
+    it('keeps palette 0 in a version 2 object', () => {
+        const store = memory(JSON.stringify({ ...defaultSettings(), palette: { precip: '0', radars: '0' } }));
+        expect(loadSettings(store).palette).toEqual({ precip: '0', radars: '0' });
+        bindStorage(store);
+        expect(settings.palette).toEqual({ precip: '0', radars: '0' });
+        expect(store.setItem).not.toHaveBeenCalled();
+    });
+
+    it('writes the migrated object once, immediately, and does not write again on reload', () => {
+        const store = v1({ palette: { precip: '0', radars: '0' }, clouds: true });
+        bindStorage(store);
+        expect(store.setItem).toHaveBeenCalledTimes(1);
+        const [key, value] = store.setItem.mock.calls[0] as [string, string];
+        expect(key).toBe(STORAGE_KEY);
+        expect(JSON.parse(value)).toEqual({ ...defaultSettings(), clouds: true });
+        expect(settings.palette).toEqual({ precip: '4', radars: '4' });
+
+        bindStorage(store);
+        expect(store.setItem).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(1000);
+        expect(store.setItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('still returns the migrated settings when setItem throws', () => {
+        const store = v1({ palette: { precip: '0', radars: '0' } });
+        store.setItem.mockImplementation(() => { throw new Error('quota'); });
+        expect(() => bindStorage(store)).not.toThrow();
+        expect(settings.palette).toEqual({ precip: '4', radars: '4' });
+        expect(settings.version).toBe(2);
     });
 });
 
@@ -155,6 +225,7 @@ describe('setters', () => {
         setOpacity('clouds', 0.9);
         resetSettings();
         expect(settings).toEqual(defaultSettings());
+        expect(settings.palette).toEqual({ precip: '4', radars: '4' });
     });
 });
 
@@ -214,7 +285,7 @@ describe('persistence', () => {
         expect(store.setItem).toHaveBeenCalledTimes(1);
         const [key, value] = store.setItem.mock.calls[0] as [string, string];
         expect(key).toBe(STORAGE_KEY);
-        expect(JSON.parse(value)).toMatchObject({ version: 1, precip: 'precip', clouds: true });
+        expect(JSON.parse(value)).toMatchObject({ version: 2, precip: 'precip', clouds: true });
     });
 
     it('flushSave writes immediately', () => {
