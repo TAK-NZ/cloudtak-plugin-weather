@@ -10,9 +10,11 @@ import LayerControls from '../lib/LayerControls.vue';
 import ForecastSlider from '../lib/ForecastSlider.vue';
 import WeatherBar from '../lib/WeatherBar.vue';
 import WeatherSettings from '../lib/WeatherSettings.vue';
+import { WeatherControl } from '../lib/control.ts';
 import { bindStorage, session, setFrame, setPrecip, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
-import { ROUTE_NAME } from '../lib/constants.ts';
+import { CONTROL_CLASS, ROUTE_NAME } from '../lib/constants.ts';
 import type { HealthState } from '../lib/types.ts';
+import { EventedFakeMap } from './helpers.ts';
 
 // 2026-01-15T00:00:00Z, a Thursday.
 const SNAPSHOT = 1768435200;
@@ -201,14 +203,15 @@ describe('ForecastSlider', () => {
         expect(slider().attributes('aria-valuetext')).toBe('~Thu 02:00 UTC, plus 120 minutes');
     });
 
-    it('shows the current-data note only while a layer is on', async () => {
+    it('shows the label on two truncating lines and the full text in its title', async () => {
+        setPrecip('precip');
+        setFrame(12);
         wrapper = mount(ForecastSlider);
+        const label = wrapper.get('[data-test=label]');
+        expect(label.findAll('.text-truncate')).toHaveLength(2);
+        expect(label.attributes('title')).toContain('~Thu 02:00 UTC');
+        expect(label.attributes('title')).toContain('+120 min');
         expect(wrapper.find('[data-test=note]').exists()).toBe(false);
-
-        toggleLayer('clouds', true);
-        await nextTick();
-        expect(wrapper.get('[data-test=note]').text())
-            .toBe('Clouds and radar always show the current data. Forecast applies to rain only.');
     });
 
     it('has no Play button', () => {
@@ -231,115 +234,66 @@ describe('WeatherSettings', () => {
 });
 
 describe('WeatherBar', () => {
-    let changeHandler: ((e: { matches: boolean }) => void) | undefined;
-    const removeListener = vi.fn();
+    let control: WeatherControl | undefined;
 
-    function media(matches: boolean): void {
-        changeHandler = undefined;
-        removeListener.mockReset();
-        window.matchMedia = vi.fn().mockImplementation(() => ({
-            matches,
-            media: '(min-width: 960px)',
-            addEventListener: (_type: string, fn: (e: { matches: boolean }) => void) => {
-                changeHandler = fn;
-            },
-            removeEventListener: removeListener,
-        })) as unknown as typeof window.matchMedia;
-    }
+    afterEach(() => {
+        control?.destroy();
+        control = undefined;
+    });
 
     const bar = (): VueWrapper => wrapper!;
-    const button = () => bar().get('[data-test=bar-button]');
 
-    it('is a 44 px button while collapsed, with a badge counting the active layers', async () => {
-        media(true);
+    it('renders the row and the controls card, with no bar button', () => {
         wrapper = mount(WeatherBar);
-        expect(bar().get('[data-test=weather-bar]').attributes('style')).toContain('width: 44px');
-        expect(button().attributes('aria-expanded')).toBe('false');
-        expect(bar().find('[data-test=badge]').exists()).toBe(false);
-        expect(bar().find('[data-test=layer-controls]').exists()).toBe(false);
+        const row = bar().get('[data-test=row]');
+        expect(row.find('[data-test=slider]').exists()).toBe(true);
+        expect(row.find('[data-test=now]').exists()).toBe(true);
+        expect(row.find('[data-test=label]').exists()).toBe(true);
+        expect(row.find('[data-test=settings]').exists()).toBe(true);
+        const controls = bar().get('[data-test=controls]');
+        expect(controls.find('[data-test=layer-controls]').exists()).toBe(true);
+        expect(controls.get('[data-test=attribution]').text()).toBe('Weather data provided by Rainbow.ai');
+        expect(row.find('[data-test=layer-controls]').exists()).toBe(false);
+        expect(bar().find('[data-test=bar-button]').exists()).toBe(false);
+        expect(bar().get('[data-test=weather-bar]').attributes('style')).toContain('width: min(640px');
+    });
 
-        toggleLayer('clouds', true);
-        setPrecip('precip');
-        await nextTick();
-        expect(bar().get('[data-test=badge]').text()).toBe('2');
+    it('shows the current-data note in the controls card only while a layer is on', async () => {
+        wrapper = mount(WeatherBar);
+        expect(bar().find('[data-test=note]').exists()).toBe(false);
 
         toggleLayer('radars', true);
         await nextTick();
-        expect(bar().get('[data-test=badge]').text()).toBe('3');
-    });
+        expect(bar().get('[data-test=controls] [data-test=note]').text())
+            .toBe('Clouds and radar always show the current data. Forecast applies to rain only.');
 
-    it('opens a single row on wide screens', async () => {
-        media(true);
-        wrapper = mount(WeatherBar);
-        await button().trigger('click');
-
-        expect(button().attributes('aria-expanded')).toBe('true');
-        expect(bar().find('[data-test=layer-controls]').exists()).toBe(true);
-        expect(bar().find('[data-test=slider]').exists()).toBe(true);
-        expect(bar().find('[data-test=popover]').exists()).toBe(false);
-        expect(bar().find('[data-test=chip]').exists()).toBe(false);
-        expect(bar().get('[data-test=attribution]').text()).toBe('Weather data provided by Rainbow.ai');
-    });
-
-    it('opens a popover and a time chip on narrow screens', async () => {
-        media(false);
-        wrapper = mount(WeatherBar);
-        await button().trigger('click');
-
-        expect(bar().find('[data-test=popover]').exists()).toBe(true);
-        expect(bar().get('[data-test=popover]').find('[data-test=slider]').exists()).toBe(true);
-        expect(bar().get('[data-test=chip]').text()).toBe('Current data');
-        expect(bar().get('[data-test=attribution]').text()).toBe('Weather data provided by Rainbow.ai');
-    });
-
-    it('follows the media query and removes its listener on unmount', async () => {
-        media(true);
-        wrapper = mount(WeatherBar);
-        await button().trigger('click');
-        expect(bar().find('[data-test=popover]').exists()).toBe(false);
-
-        changeHandler?.({ matches: false });
+        toggleLayer('radars', false);
         await nextTick();
-        expect(bar().find('[data-test=popover]').exists()).toBe(true);
-
-        const handler = changeHandler;
-        wrapper.unmount();
-        wrapper = undefined;
-        expect(removeListener).toHaveBeenCalledWith('change', handler);
+        expect(bar().find('[data-test=note]').exists()).toBe(false);
     });
 
-    it('Escape closes the popover and returns focus to the bar button', async () => {
-        media(false);
+    it('Escape closes the panel and returns focus to the weather button', async () => {
+        const fake = new EventedFakeMap();
+        control = new WeatherControl({ onToggle: () => undefined });
+        fake.addControl(control, 'top-left');
+        session.panelOpen = true;
         wrapper = mount(WeatherBar, { attachTo: document.body });
-        await button().trigger('click');
-        const toggle = bar().get('[data-test=popover] [data-test=toggle-clouds]');
+        const toggle = bar().get('[data-test=toggle-clouds]');
         (toggle.element as HTMLElement).focus();
 
         await toggle.trigger('keydown', { key: 'Escape' });
         await nextTick();
 
-        expect(button().attributes('aria-expanded')).toBe('false');
-        expect(bar().find('[data-test=popover]').exists()).toBe(false);
-        expect(document.activeElement).toBe(button().element);
+        expect(session.panelOpen).toBe(false);
+        expect(document.activeElement).toBe(document.querySelector(`.${CONTROL_CLASS} button`));
     });
 
-    it('the settings gear opens the settings route', async () => {
-        media(true);
+    it('the settings gear opens the settings route and leaves the panel open', async () => {
+        session.panelOpen = true;
         wrapper = mount(WeatherBar);
-        await button().trigger('click');
         await bar().get('[data-test=settings]').trigger('click');
         expect(routerMock.push).toHaveBeenCalledWith({ name: ROUTE_NAME });
-    });
-
-    it('shows the current-data note above the wide bar while a layer is on', async () => {
-        media(true);
-        wrapper = mount(WeatherBar);
-        await button().trigger('click');
-        expect(bar().find('[data-test=note]').exists()).toBe(false);
-
-        toggleLayer('radars', true);
-        await nextTick();
-        expect(bar().get('[data-test=note]').text()).toContain('Forecast applies to rain only');
+        expect(session.panelOpen).toBe(true);
     });
 
     const HEALTH: [string, HealthState, string][] = [
@@ -351,16 +305,12 @@ describe('WeatherBar', () => {
         ['service unavailable', { kind: 'degraded', since: 1, status: 502 }, 'Weather service unavailable'],
     ];
 
-    it.each(HEALTH)('shows the %s text in a status region', async (_name, state, text) => {
-        for (const [wide, open] of [[true, false], [true, true], [false, true]] as const) {
-            media(wide);
-            session.panelOpen = open;
-            session.health = state;
-            const w = mount(WeatherBar);
-            await nextTick();
-            const status = w.get('[role=status]');
-            expect(status.text()).toBe(text);
-            w.unmount();
-        }
+    it.each(HEALTH)('shows the %s text in the status region of the controls card', async (_name, state, text) => {
+        session.health = state;
+        wrapper = mount(WeatherBar);
+        await nextTick();
+        const status = bar().get('[data-test=controls] [role=status]');
+        expect(status.attributes('data-test')).toBe('health');
+        expect(status.text()).toBe(text);
     });
 });

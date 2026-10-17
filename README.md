@@ -6,10 +6,11 @@ Weather data provided by [Rainbow.ai](https://rainbow.ai).
 
 ## What it does
 
-* A weather button sits at the bottom centre of the map. A badge shows how many layers are on. All layers are off by default, so nothing is requested until you turn one on.
+* A weather button sits in the map's left controls, under the 3D terrain button. A dot on it shows that a layer is on while the panel is closed. Click it to open the weather bar at the bottom of the map; click it again, or press Escape, to close it. Closing the bar leaves the layers on. All layers are off by default, so nothing is requested until you turn one on.
 * **Clouds** and **Radar** are toggles. **Rain** is Off, Regional or Global.
 * The **forecast slider** moves rain from **Now** up to 4 hours ahead in 10 minute steps. Clouds and radar always show the current data; they get a `current` tag while a forecast time is selected. The forecast is not remembered: the map opens at Now.
-* The **Weather** menu entry (right-side menu, or the gear in the bar) has per-layer opacity, rain and radar colour palettes, a coverage mask, radar precipitation type, map tile sharpness, and the time zone for labels (New Zealand, UTC or this device). Settings are stored in the browser.
+* The **Weather** menu entry (right-side menu, or the gear in the open bar) has per-layer opacity, rain and radar colour palettes, a coverage mask, radar precipitation type, map tile sharpness, and the time zone for labels (New Zealand, UTC or this device). Settings are stored in the browser.
+* Rain and radar use colour palette 4 by default. A stored default of palette 0 from an earlier version is switched to 4 once; other choices are kept, and a palette 0 you pick afterwards stays.
 * Times are shown as approximate (`~`) because the weather service picks its own latest 10 minute data slot.
 
 ## Requirements
