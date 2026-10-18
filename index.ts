@@ -9,7 +9,9 @@ import { IconWeather } from './lib/icon.ts';
 import { WeatherControl, focusWeatherControl } from './lib/control.ts';
 import type { ControlHost } from './lib/control.ts';
 import { host } from './lib/host.ts';
-import { BOTTOM_KEY, ID_PREFIX, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
+import { BOTTOM_KEY, ID_PREFIX, MENU_KEY, PANEL_ID, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
+import { createPanelCoordinator } from './lib/panel-coordinator.ts';
+import type { PanelCoordinator } from './lib/panel-coordinator.ts';
 import { TokenUnavailableError, fetchStatus, tileTemplate } from './lib/relay-client.ts';
 import type { StatusReason } from './lib/relay-client.ts';
 import { LayerStack, SLOT_ORDER, computeDesired, isSelected, noForecastAt, requestFor } from './lib/layers.ts';
@@ -54,6 +56,10 @@ interface Activation {
     seq: number;
     map?: MapLike & Partial<ControlHost>;
     control?: WeatherControl;
+    /** Tells other plugins when the panel opens or closes, and closes it when one of them opens (lib/panel-coordinator.ts). */
+    panel?: PanelCoordinator;
+    /** True while the panel closes because another plugin opened its own: setBar must not announce a plain close. */
+    yielding: boolean;
     stack?: LayerStack;
     player?: Player;
     monitor: HealthMonitor;
@@ -159,6 +165,7 @@ export default class WeatherPlugin implements PluginInstance {
             intervals: [],
             stops: [],
             registered: { route: false, menu: false, bar: false },
+            yielding: false,
         };
         this.active = act;
 
@@ -202,6 +209,25 @@ export default class WeatherPlugin implements PluginInstance {
             act.control = control;
             map.addControl(control, 'top-left');
             control.place();
+
+            // Weather has no work to lose: when another plugin opens its bottom panel, close ours.
+            const panel = createPanelCoordinator({
+                id: PANEL_ID,
+                isShown: () => act.registered.bar,
+                hasState: () => false,
+                close: () => {
+                    act.yielding = true;
+                    try {
+                        session.panelOpen = false;
+                    } finally {
+                        act.yielding = false;
+                    }
+                },
+                minimize: () => undefined,
+                restore: () => undefined,
+            });
+            act.panel = panel;
+            act.stops.push(() => panel.dispose());
 
             act.stack = new LayerStack(map);
             act.player = this.makePlayer(act);
@@ -339,6 +365,10 @@ export default class WeatherPlugin implements PluginInstance {
             console.warn('[weather] Could not update the weather bar', err);
         }
         if (act.registered.bar !== open) return;
+
+        // A close made to give way to another plugin has already told it who we yielded to.
+        if (open) act.panel?.opened();
+        else if (!act.yielding) act.panel?.closed();
 
         setFrame(0);
         if (open) this.addEscape(act);
@@ -597,6 +627,8 @@ export default class WeatherPlugin implements PluginInstance {
         act.intervals = [];
         if (act.rollover !== undefined) clearTimeout(act.rollover);
         act.rollover = undefined;
+        // The stops below end the panelOpen watcher, so tell other plugins here that the panel is gone.
+        if (act.registered.bar) act.panel?.closed();
         for (const stop of act.stops) {
             try {
                 stop();

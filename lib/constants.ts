@@ -4,6 +4,8 @@ export const MENU_KEY = 'weather';
 export const ROUTE_NAME = 'home-menu-plugin-weather';
 export const ROUTE_PATH = 'plugin-weather';
 export const BOTTOM_KEY = 'taknz-weather';
+/** Id in the plugin panel events (see lib/panel-coordinator.ts). */
+export const PANEL_ID = BOTTOM_KEY;
 export const STORAGE_KEY = 'taknz-weather:v1';
 /** Schema version of the stored settings object (the storage key is unchanged). */
 export const SETTINGS_VERSION = 3;
