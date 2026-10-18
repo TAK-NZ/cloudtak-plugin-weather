@@ -15,6 +15,16 @@ Weather data provided by [Rainbow.ai](https://rainbow.ai).
 * Settings saved by an earlier version (one Rain choice: Off, Regional or Global) are converted once to the two Rain toggles. Rain and radar use colour palette 4 (Nexrad) by default. A stored default of palette 0 from an earlier version is switched to 4 once; other choices are kept, and a palette 0 you pick afterwards stays.
 * **Other plugins.** The weather panel has nothing to lose, so when another plugin opens its own panel at the bottom of the map (for example Rubber Sheet), the weather panel closes; the layers stay on and the dot appears on the button. It does not reopen by itself. The plugins tell each other through two events on `window`, `cloudtak-plugin:panel-open` and `cloudtak-plugin:panel-close`; the contract is described in [`docs/fork/PLUGIN-PANELS.md`](https://github.com/TAK-NZ/CloudTAK/blob/main/docs/fork/PLUGIN-PANELS.md) of the TAK-NZ CloudTAK fork (not yet merged there), and the shared helper is `lib/panel-coordinator.ts` (MIT-0). Pressing Escape is left to an open modal dialog such as the image editor.
 * The map shows "Weather © Rainbow.ai" as source attribution while a weather layer is on. The settings page links to Rainbow.ai.
+## Screenshots
+
+The weather panel at the bottom of the map with Rain Global on, and the Weather Settings window on the right with the opacity sliders, the colour palettes with their legends, the options and the time zone.
+
+![Weather panel and Weather Settings over New Zealand](docs/screenshots/cloudtak-plugin-weather.png)
+
+Play steps through the last 2 hours and the rain forecast, and loops.
+
+![Weather Play loop](docs/screenshots/cloudtak-plugin-weather-animated.gif)
+
 ## Requirements
 
 A CloudTAK server that provides `/api/weather/status` and `/api/weather/tile/{z}/{x}/{y}.png`, which is the [TAK-NZ CloudTAK fork](https://github.com/TAK-NZ/CloudTAK). If the endpoint is missing or switched off, the plugin adds nothing to the app. A status with a per-layer `latest` lets the timeline line up with each layer's newest data; with an older relay the plugin uses the status snapshot and still works.
