@@ -25,8 +25,6 @@ Play steps through the frames and loops.
 
 <img src="docs/screenshots/cloudtak-plugin-weather-animated.gif" alt="Weather Play loop" width="480">
 
-The animation is only 122 × 92 pixels, so it is scaled up here.
-
 ## Requirements
 
 A CloudTAK server that provides `/api/weather/status` and `/api/weather/tile/{z}/{x}/{y}.png`, which is the [TAK-NZ CloudTAK fork](https://github.com/TAK-NZ/CloudTAK). If the endpoint is missing or switched off, the plugin adds nothing to the app. A status with a per-layer `latest` lets the timeline line up with each layer's newest data; with an older relay the plugin uses the status snapshot and still works.
