@@ -111,6 +111,16 @@
                 >
                 <span class='form-check-label'>Show precipitation type on radar</span>
             </label>
+            <label class='form-check m-0'>
+                <input
+                    type='checkbox'
+                    class='form-check-input'
+                    data-test='play-forecast'
+                    :checked='settings.playForecast'
+                    @change='setPlayForecast(checked($event))'
+                >
+                <span class='form-check-label'>Include forecast when playing</span>
+            </label>
         </section>
 
         <fieldset
@@ -141,7 +151,7 @@
                     :checked='settings.tileSize === 256'
                     @change='setTileSize(256)'
                 >
-                <span class='form-check-label'>Sharper (about 4x requests)</span>
+                <span class='form-check-label'>Sharper (about 4x requests; Play loads more tiles)</span>
             </label>
         </fieldset>
 
@@ -235,6 +245,7 @@ import {
     setCoverage,
     setOpacity,
     setPalette,
+    setPlayForecast,
     setRadarsPrecipType,
     setTileSize,
     setTimeZone,

@@ -23,6 +23,7 @@ export function defaultSettings(): WeatherSettings {
         radarsPrecipType: false,
         tileSize: 512,
         timeZone: 'Pacific/Auckland',
+        playForecast: false,
     };
 }
 
@@ -61,7 +62,8 @@ interface Stored {
  * Read and sanitise stored settings. Any non-string result of getItem (null, or
  * undefined as the test stub returns) counts as absent; anything unusable gives defaults.
  * A missing, 1 or 2 version is an old object: it is sanitised and migrated to the current
- * version. Version 3 is current. Any other version gives defaults.
+ * version. Version 3 is current (a version 3 object without `playForecast` gets false).
+ * Any other version gives defaults.
  * Versions up to 2 stored Rain as one mode ('none' | 'precip' | 'precip-global'); it becomes
  * the two Rain switches, and the Global Rain opacity starts as the Rain opacity.
  */
@@ -113,6 +115,7 @@ function readStored(from: StorageLike | null | undefined): Stored {
         radarsPrecipType: bool(parsed.radarsPrecipType, d.radarsPrecipType),
         tileSize: oneOf(parsed.tileSize, [256, 512] as const, d.tileSize),
         timeZone: oneOf(parsed.timeZone, TIME_ZONES, d.timeZone),
+        playForecast: bool(parsed.playForecast, d.playForecast),
     };
 
     if (oldPalette) {
@@ -169,6 +172,12 @@ export interface Session {
     latest: Partial<Record<WeatherLayer, number>>;
     status: RelayStatus | null;
     health: HealthState;
+    /** Play is on (also while suspended by a rate limit). */
+    playing: boolean;
+    /** The frame the hidden buffer loads while playing (one ahead), else null. */
+    preload: number | null;
+    /** While playing is suspended: when it resumes by itself (epoch ms). */
+    resumeAt: number | null;
 }
 
 /** Per-page-load state. Never persisted. */
@@ -180,6 +189,9 @@ export const session = reactive<Session>({
     latest: {},
     status: null,
     health: { kind: 'ok' },
+    playing: false,
+    preload: null,
+    resumeAt: null,
 });
 
 const save = debounce(() => {
@@ -239,6 +251,12 @@ export function setTileSize(size: 256 | 512): void {
     save();
 }
 
+export function setPlayForecast(value: boolean): void {
+    if (typeof value !== 'boolean') return;
+    settings.playForecast = value;
+    save();
+}
+
 export function setTimeZone(tz: TimeZoneSetting): void {
     if (!TIME_ZONES.includes(tz)) return;
     settings.timeZone = tz;
@@ -259,6 +277,13 @@ function frameMax(): number {
 export function setFrame(i: number): void {
     session.frame = clampFrame(i, frameMax());
     session.draftFrame = null;
+}
+
+/** The player's view in the session. Anything but playing also drops the preload. */
+export function setPlaying(playing: boolean, resumeAt: number | null = null): void {
+    session.playing = playing;
+    session.resumeAt = playing ? resumeAt : null;
+    if (!playing) session.preload = null;
 }
 
 export function setDraftFrame(i: number | null): void {

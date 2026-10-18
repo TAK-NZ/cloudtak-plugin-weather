@@ -7,8 +7,28 @@
     >
         <button
             type='button'
-            class='btn btn-sm btn-outline-secondary flex-shrink-0'
-            style='min-height: 44px; min-width: 44px;'
+            class='btn btn-icon p-0 d-inline-flex align-items-center justify-content-center flex-shrink-0 taknz-wx-play'
+            aria-label='Play'
+            data-test='play'
+            :aria-pressed='session.playing'
+            :disabled='disabled'
+            :title='playTitle'
+            @click='togglePlay()'
+        >
+            <IconPlayerPause
+                v-if='session.playing'
+                :size='24'
+                stroke='1.5'
+            />
+            <IconPlayerPlay
+                v-else
+                :size='24'
+                stroke='1.5'
+            />
+        </button>
+        <button
+            type='button'
+            class='btn btn-sm btn-outline-secondary flex-shrink-0 taknz-wx-now'
             data-test='now'
             :disabled='disabled || shownFrame === 0'
             @click='onNow'
@@ -31,6 +51,7 @@
                 :value='shownFrame'
                 :disabled='disabled'
                 :aria-valuetext='label.text'
+                @pointerdown='stopPlay()'
                 @input='onInput'
                 @change='onChange'
             >
@@ -74,8 +95,9 @@
 <script setup lang='ts'>
 import { computed, onBeforeUnmount } from 'vue';
 import type { CSSProperties } from 'vue';
-import { IconAlertTriangle } from '@tabler/icons-vue';
+import { IconAlertTriangle, IconPlayerPause, IconPlayerPlay } from '@tabler/icons-vue';
 import { healthShort } from './health.ts';
+import { stopPlay, togglePlay } from './player.ts';
 import { rainOn, session, setDraftFrame, setFrame, settings } from './state.ts';
 import { FRAME_MIN, clampFrame, debounce, frameBounds, frameLabel } from './time.ts';
 
@@ -83,7 +105,10 @@ const DISABLED_TITLE = 'Turn on a layer to use the timeline';
 const COMMIT_DELAY_MS = 150;
 const THUMB_INSET_PX = 8;
 
+const PLAY_DISABLED_TITLE = 'Turn on a layer to play';
+
 const disabled = computed(() => !settings.clouds && !settings.radars && !rainOn(settings));
+const playTitle = computed(() => disabled.value ? PLAY_DISABLED_TITLE : session.playing ? 'Pause' : 'Play');
 const bounds = computed(() => frameBounds(rainOn(settings)));
 const shownFrame = computed(() => clampFrame(session.draftFrame ?? session.frame, bounds.value.max));
 
@@ -116,6 +141,7 @@ function readFrame(e: Event): number {
 }
 
 function onInput(e: Event): void {
+    stopPlay();
     const frame = readFrame(e);
     setDraftFrame(frame);
     commit(frame);
@@ -127,6 +153,7 @@ function onChange(e: Event): void {
 }
 
 function onNow(): void {
+    stopPlay();
     commit.cancel();
     setFrame(0);
 }
@@ -136,3 +163,30 @@ onBeforeUnmount(() => {
     setDraftFrame(null);
 });
 </script>
+
+<style scoped>
+.taknz-wx-play {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+}
+.taknz-wx-now {
+    min-height: 44px;
+    min-width: 44px;
+}
+.taknz-wx-play[aria-pressed='true'] {
+    color: var(--tblr-primary, #4f8cff);
+}
+/* Narrow phones: keep the slider at 96 px or more with the Play button added. */
+@media (max-width: 419px) {
+    .taknz-wx-play {
+        width: 40px;
+        flex-basis: 40px;
+    }
+    .taknz-wx-now {
+        min-width: 40px;
+        padding-left: 0.4rem;
+        padding-right: 0.4rem;
+    }
+}
+</style>

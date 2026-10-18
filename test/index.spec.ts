@@ -13,7 +13,8 @@ const hostMock = vi.hoisted(() => ({
 vi.mock('../lib/host.ts', () => hostMock);
 
 import WeatherPlugin from '../index.ts';
-import { bindStorage, session, setFrame, settings, toggleLayer } from '../lib/state.ts';
+import { bindStorage, flushSave, session, setFrame, setPlaying, settings, toggleLayer } from '../lib/state.ts';
+import { togglePlay } from '../lib/player.ts';
 import { snapshotAt } from '../lib/time.ts';
 import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
 import { EventedFakeMap, deferred, jsonResponse, latestBody, makeFakeApi, setRain, statusBody } from './helpers.ts';
@@ -53,6 +54,7 @@ beforeEach(() => {
     session.latest = {};
     session.panelOpen = false;
     session.health = { kind: 'ok' };
+    setPlaying(false);
     vi.spyOn(console, 'info').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -879,6 +881,325 @@ describe('timeline', () => {
             escape();
             expect(session.panelOpen).toBe(true);
             session.panelOpen = false;
+        });
+    });
+});
+
+describe('play', () => {
+    const T0 = Date.parse('2026-01-15T00:25:00Z');
+    const A = snapshotAt(T0);
+    const snapOf = (url: string | undefined): number => Number(new URL(url ?? 'https://x/?').searchParams.get('snapshot'));
+    const frameOf = (url: string | undefined): number => (snapOf(url) - A) / 600;
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    /** What a slot shows and what its hidden buffer loads, from the map. */
+    function buffers(map: EventedFakeMap, slot = 'clouds'): { visible?: string; hidden?: string; layers: string[] } {
+        const out: { visible?: string; hidden?: string; layers: string[] } = { layers: [] };
+        for (const suffix of ['', '-b']) {
+            const layer = map.getLayer(`taknz-wx-${slot}${suffix}`);
+            if (!layer) continue;
+            out.layers.push(layer.id);
+            const tiles = map.sources.get(`taknz-wx-${slot}${suffix}-src`)?.tiles[0];
+            if (layer.paint?.['raster-opacity'] === 0) out.hidden = tiles;
+            else out.visible = tiles;
+        }
+        return out;
+    }
+
+    /** Every weather source is loaded and MapLibre reported progress. */
+    function loaded(map: EventedFakeMap): void {
+        map.controlLoading();
+        for (const id of map.sources.keys()) if (id.startsWith('taknz-wx-')) map.loadedIds.add(id);
+        map.emit('render');
+        map.emit('render');
+    }
+
+    async function begin(prepare: () => void = () => toggleLayer('clouds', true)): Promise<EventedFakeMap> {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        host.fetch.mockImplementation(async () => jsonResponse(200, {
+            ...statusBody({ serverTime: Math.floor(Date.now() / 1000), snapshot: snapshotAt(Date.now()) }),
+            latest: latestBody(snapshotAt(Date.now())),
+        }));
+        prepare();
+        // The settings save debounce is a timer of its own; the tests count the plugin's.
+        flushSave();
+        const map = new EventedFakeMap();
+        const { instance } = await install(map);
+        await instance.enable();
+        await plugin?.pending;
+        await vi.advanceTimersByTimeAsync(0);
+        return map;
+    }
+
+    /** MapLibre renders on: a buffer that was just swapped out may go. */
+    const settled = (map: EventedFakeMap): void => {
+        for (let i = 0; i < 12; i++) map.emit('render');
+    };
+
+    async function step(map: EventedFakeMap, ms = 700): Promise<void> {
+        loaded(map);
+        await vi.advanceTimersByTimeAsync(ms);
+    }
+
+    it('Play shows -12 and loads -11 into the hidden buffer; each step swaps and loads exactly one frame ahead', async () => {
+        const map = await begin();
+        expect(session.playing).toBe(false);
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(session.playing).toBe(true);
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).visible)).toBe(-12);
+        expect(frameOf(buffers(map).hidden)).toBe(-11);
+
+        for (let k = -11; k <= 0; k++) {
+            await step(map);
+            expect(session.frame).toBe(k);
+            const b = buffers(map);
+            expect(frameOf(b.visible)).toBe(k);
+            // the hidden buffer holds the next frame; on Now it holds the restart frame
+            if (k < 0) expect(frameOf(b.hidden)).toBe(k + 1);
+            else expect(frameOf(b.hidden)).toBe(-12);
+        }
+        expect(map.counters.moveLayer).toBe(0);
+    });
+
+    it('holds on Now, then restarts at -12', async () => {
+        const map = await begin();
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        for (let i = 0; i < 12; i++) await step(map);
+        expect(session.frame).toBe(0);
+        await step(map, 1199);
+        expect(session.frame).toBe(0);
+        await step(map, 1);
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).visible)).toBe(-12);
+    });
+
+    it('with Include forecast when playing and Rain it runs to +24', async () => {
+        const map = await begin(() => {
+            setRain('precip');
+            settings.playForecast = true;
+        });
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        for (let i = 0; i < 36; i++) await step(map);
+        expect(session.frame).toBe(24);
+        expect(new URL(map.sources.get('taknz-wx-precip-src')?.tiles[0] ?? 'https://x/?').searchParams.get('forecast')).toBe('240');
+    });
+
+    it('Play needs a layer', async () => {
+        const map = await begin(() => undefined);
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(session.playing).toBe(false);
+        expect(map.counters.addLayer).toBe(0);
+    });
+
+    it('switching the last layer off ends Play', async () => {
+        const map = await begin();
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        toggleLayer('clouds', false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(session.playing).toBe(false);
+        expect(session.preload).toBeNull();
+        expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
+    });
+
+    it('does not wait forever for tiles that never load', async () => {
+        const map = await begin();
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(2999);
+        expect(session.frame).toBe(-12);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(session.frame).toBe(-11);
+        expect(map.counters.moveLayer).toBe(0);
+    });
+
+    describe('pausing', () => {
+        it.each(['dragstart', 'zoomstart', 'rotatestart'])('%s on the map pauses at the current frame', async (type) => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            await step(map);
+            await step(map);
+            expect(session.frame).toBe(-10);
+            map.emit(type);
+            expect(session.playing).toBe(false);
+            expect(session.preload).toBeNull();
+            await vi.advanceTimersByTimeAsync(0);
+            settled(map);
+            expect(buffers(map).layers).toHaveLength(1);
+            expect(frameOf(buffers(map).visible)).toBe(-10);
+            await step(map, 5000);
+            expect(session.frame).toBe(-10);
+        });
+
+        it('our own setTiles and swaps do not pause it', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            for (let i = 0; i < 5; i++) await step(map);
+            expect(map.counters.setTiles + map.counters.setPaintProperty).toBeGreaterThan(0);
+            expect(session.playing).toBe(true);
+            expect(session.frame).toBe(-7);
+        });
+
+        it('closing the panel pauses', async () => {
+            const map = await begin();
+            controlButton()?.click();
+            expect(session.panelOpen).toBe(true);
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            await step(map);
+            controlButton()?.click();
+            expect(session.panelOpen).toBe(false);
+            expect(session.playing).toBe(false);
+            expect(session.frame).toBe(0);
+        });
+
+        it('a relay 429 suspends Play with the status, drops the preload and resumes by itself after 60 s', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            await step(map);
+            const suspendedAt = Date.now();
+            map.emit('error', { sourceId: 'taknz-wx-clouds-b-src', error: { status: 429 } });
+            expect(session.health.kind).toBe('limited');
+            expect(session.playing).toBe(true);
+            expect(session.resumeAt).toBe(suspendedAt + 60_000);
+            await vi.advanceTimersByTimeAsync(0);
+            settled(map);
+            expect(buffers(map).hidden).toBeUndefined();
+            const frame = session.frame;
+            await vi.advanceTimersByTimeAsync(59_000);
+            expect(session.frame).toBe(frame);
+            expect(session.resumeAt).not.toBeNull();
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(session.resumeAt).toBeNull();
+            expect(session.playing).toBe(true);
+            // resumed on the same frame, loading the next one even though the relay was limited
+            expect(frameOf(buffers(map).hidden)).toBe(frame + 1);
+            map.emit('sourcedata', { sourceId: 'taknz-wx-clouds-b-src', tile: {} });
+            expect(session.health.kind).toBe('ok');
+            await step(map);
+            expect(session.frame).toBe(frame + 1);
+        });
+
+        it('pressing Play during the suspension resumes at once', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            map.emit('error', { sourceId: 'taknz-wx-clouds-src', error: { status: 429 } });
+            expect(session.resumeAt).not.toBeNull();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(session.resumeAt).toBeNull();
+            expect(session.playing).toBe(true);
+            expect(buffers(map).hidden).toBeDefined();
+        });
+
+        it('a 429 right after a resume suspends again', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            map.emit('error', { sourceId: 'taknz-wx-clouds-src', error: { status: 429 } });
+            await vi.advanceTimersByTimeAsync(60_000);
+            expect(session.resumeAt).toBeNull();
+            map.emit('error', { sourceId: 'taknz-wx-clouds-b-src', error: { status: 429 } });
+            expect(session.resumeAt).not.toBeNull();
+            expect(session.playing).toBe(true);
+        });
+
+        it.each([[502], [401], [403]])('a relay %i ends Play', async (status) => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            map.emit('error', { sourceId: 'taknz-wx-clouds-src', error: { status } });
+            expect(session.playing).toBe(false);
+            expect(session.resumeAt).toBeNull();
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(session.playing).toBe(false);
+        });
+
+        it('errors of other map sources do not touch Play', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            map.emit('error', { sourceId: 'basemap', error: { status: 429 } });
+            expect(session.playing).toBe(true);
+            expect(session.resumeAt).toBeNull();
+        });
+    });
+
+    describe('cleanup', () => {
+        it('disable() while playing leaves no timer, listener, source or layer', async () => {
+            const map = await begin();
+            const timersBefore = vi.getTimerCount();
+            expect(timersBefore).toBeGreaterThan(0);
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            await step(map);
+            await plugin?.disable();
+            expect(session.playing).toBe(false);
+            expect(session.preload).toBeNull();
+            expect(session.resumeAt).toBeNull();
+            expect(vi.getTimerCount()).toBe(0);
+            expect(map.listenerCount()).toBe(0);
+            expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
+            expect([...map.sources.keys()].some((id) => id.startsWith('taknz-wx-'))).toBe(false);
+            // the button of a closed panel does nothing any more
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(5000);
+            expect(session.playing).toBe(false);
+            expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
+        });
+
+        it('disable() during a suspension leaves no timer either', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            map.emit('error', { sourceId: 'taknz-wx-clouds-src', error: { status: 429 } });
+            await plugin?.disable();
+            expect(vi.getTimerCount()).toBe(0);
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(session.playing).toBe(false);
+        });
+
+        it('enable and disable twice in a row are harmless while playing', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            await plugin?.enable();
+            await plugin?.pending;
+            await vi.advanceTimersByTimeAsync(0);
+            expect(session.playing).toBe(false);
+            await plugin?.disable();
+            await plugin?.disable();
+            expect(vi.getTimerCount()).toBe(0);
+            expect(map.listenerCount()).toBe(0);
+            expect([...map.sources.keys()].some((id) => id.startsWith('taknz-wx-'))).toBe(false);
+        });
+
+        it('a map that throws after teardown does not escape', async () => {
+            const map = await begin();
+            togglePlay();
+            await vi.advanceTimersByTimeAsync(0);
+            const broken = new Error('map destroyed');
+            for (const method of ['getLayer', 'getSource', 'getStyle', 'addLayer', 'removeLayer', 'removeSource', 'setPaintProperty'] as const) {
+                (map as unknown as Record<string, unknown>)[method] = () => {
+                    throw broken;
+                };
+            }
+            await expect(plugin?.disable()).resolves.toBeUndefined();
+            await vi.advanceTimersByTimeAsync(10_000);
+            expect(vi.getTimerCount()).toBe(0);
         });
     });
 });

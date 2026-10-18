@@ -9,14 +9,15 @@ import { IconWeather } from './lib/icon.ts';
 import { WeatherControl, focusWeatherControl } from './lib/control.ts';
 import type { ControlHost } from './lib/control.ts';
 import { host } from './lib/host.ts';
-import { BOTTOM_KEY, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
+import { BOTTOM_KEY, ID_PREFIX, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
 import { TokenUnavailableError, fetchStatus, tileTemplate } from './lib/relay-client.ts';
 import type { StatusReason } from './lib/relay-client.ts';
 import { LayerStack, SLOT_ORDER, computeDesired, isSelected, requestFor } from './lib/layers.ts';
-import type { MapLike } from './lib/layers.ts';
+import type { MapLike, PreloadUrls } from './lib/layers.ts';
+import { MAX_SUSPEND_MS, Player, bindPlayer, playRange } from './lib/player.ts';
 import { HealthMonitor, healthMessage } from './lib/health.ts';
 import type { MapErrorLike } from './lib/health.ts';
-import { rainOn, session, setFrame, settings } from './lib/state.ts';
+import { rainOn, session, setFrame, setPlaying, settings } from './lib/state.ts';
 import { anchorFrom, applyServerTime, clock, rolloverJitterMs, snapshotAt, validLatest } from './lib/time.ts';
 import { exposeDebug } from './lib/debug.ts';
 
@@ -26,6 +27,17 @@ const STATUS_MIN_GAP_MS = 30_000;
 const IDLE_THROTTLE_MS = 2000;
 
 type Listener = (e: unknown) => void;
+
+/** Whether at least one weather layer is switched on. */
+function anyLayer(): boolean {
+    return settings.clouds || settings.radars || rainOn(settings);
+}
+
+/** A MapLibre error event of a weather source that carries HTTP 429. */
+function isRateLimit(e: unknown): boolean {
+    const ev = e as { sourceId?: unknown; error?: { status?: unknown } | null } | null;
+    return typeof ev?.sourceId === 'string' && ev.sourceId.startsWith(ID_PREFIX) && ev.error?.status === 429;
+}
 
 interface EventedMap {
     on(type: string, fn: Listener): unknown;
@@ -41,11 +53,16 @@ interface Activation {
     map?: MapLike & Partial<ControlHost>;
     control?: WeatherControl;
     stack?: LayerStack;
+    player?: Player;
     monitor: HealthMonitor;
     /** Tile URLs currently on the map, per slot. */
     applied: Partial<Record<LayerSlot, string>>;
     /** A tile-URL change was held back because the relay is unhealthy. */
     queued: boolean;
+    /** The next frame/preload change comes from the player, not from the user. */
+    fromPlayer: boolean;
+    /** The next sync applies even though the relay is unhealthy (Play resumed after a rate limit). */
+    forceNext: boolean;
     /** Kinds of tile-URL failures already reported, so each is logged once per activation. */
     warned: Set<string>;
     lastStatusAt: number;
@@ -131,6 +148,8 @@ export default class WeatherPlugin implements PluginInstance {
             }),
             applied: {},
             queued: false,
+            fromPlayer: false,
+            forceNext: false,
             warned: new Set(),
             lastStatusAt: Date.now(),
             lastIdleAt: 0,
@@ -183,6 +202,8 @@ export default class WeatherPlugin implements PluginInstance {
             control.place();
 
             act.stack = new LayerStack(map);
+            act.player = this.makePlayer(act);
+            bindPlayer(act.player);
 
             this.listen(act, map);
             this.start(act);
@@ -208,11 +229,17 @@ export default class WeatherPlugin implements PluginInstance {
             const action = act.monitor.onMapError(e as MapErrorLike);
             if (action === 'refresh-token') void this.sync(act, true);
             else if (action === 'refetch-status') void this.refreshStatus(act, true);
+            // The health state does not change on a repeated 429, so ask the player directly.
+            if (isRateLimit(e)) act.player?.suspend(Date.now() + MAX_SUSPEND_MS);
         };
         const onSourceData: Listener = (e) => {
             const ev = e as { sourceId?: unknown; tile?: unknown };
             if (ev.tile && typeof ev.sourceId === 'string') act.monitor.onTileLoaded(ev.sourceId);
+            act.stack?.noteMapEvent('sourcedata', ev);
         };
+        const onRender: Listener = () => act.stack?.noteMapEvent('render');
+        // A user gesture on the map ends Play. Our own setTiles never fires these.
+        const onGesture: Listener = () => act.player?.stop('user');
         const onIdle: Listener = () => {
             const now = Date.now();
             if (act.dead || now - act.lastIdleAt < IDLE_THROTTLE_MS) return;
@@ -224,7 +251,16 @@ export default class WeatherPlugin implements PluginInstance {
             }
         };
 
-        for (const [type, fn] of [['error', onError], ['sourcedata', onSourceData], ['idle', onIdle]] as const) {
+        const listeners: (readonly [string, Listener])[] = [
+            ['error', onError],
+            ['sourcedata', onSourceData],
+            ['render', onRender],
+            ['idle', onIdle],
+            ['dragstart', onGesture],
+            ['zoomstart', onGesture],
+            ['rotatestart', onGesture],
+        ];
+        for (const [type, fn] of listeners) {
             evented.on(type, fn);
             act.stops.push(() => {
                 try {
@@ -246,13 +282,24 @@ export default class WeatherPlugin implements PluginInstance {
         this.refreshControl(act);
 
         act.stops.push(watch(
-            [settings, () => session.frame],
+            [settings, () => session.frame, () => session.preload],
             () => {
-                act.monitor.noteUserAction();
-                void this.sync(act);
+                const force = act.forceNext;
+                if (!act.fromPlayer) act.monitor.noteUserAction();
+                act.fromPlayer = false;
+                act.forceNext = false;
+                void this.sync(act, force);
             },
             { deep: true }
         ));
+        // Play needs a layer, and it ends when the relay says it cannot serve us.
+        act.stops.push(watch(() => anyLayer(), (on) => {
+            if (!on) act.player?.stop('layers');
+        }, { flush: 'sync' }));
+        act.stops.push(watch(() => session.health, (h) => {
+            if (h.kind === 'limited') act.player?.suspend(Math.min(h.until, Date.now() + MAX_SUSPEND_MS));
+            else if (h.kind !== 'ok') act.player?.stop('health');
+        }, { flush: 'sync' }));
         act.stops.push(watch([() => session.snapshot, () => session.latest], () => {
             void this.sync(act);
         }));
@@ -280,6 +327,7 @@ export default class WeatherPlugin implements PluginInstance {
      * and closes on Now, and Escape closes it only while it is open.
      */
     private setBar(act: Activation, open: boolean): void {
+        if (!open) act.player?.stop('panel');
         if (act.dead || open === act.registered.bar) return;
         try {
             if (open) this.api.bottomBar.add({ key: BOTTOM_KEY, component: WeatherBar });
@@ -312,15 +360,37 @@ export default class WeatherPlugin implements PluginInstance {
         act.onEscape = undefined;
     }
 
+    private makePlayer(act: Activation): Player {
+        return new Player({
+            range: () => playRange(rainOn(settings), settings.playForecast),
+            hasLayers: anyLayer,
+            frame: () => session.frame,
+            show: (frame, preload) => {
+                act.fromPlayer = true;
+                // Resuming after a rate limit has to get through the health gate once.
+                if (session.health.kind !== 'ok') act.forceNext = true;
+                void Promise.resolve().then(() => {
+                    act.fromPlayer = false;
+                });
+                setFrame(frame);
+                session.preload = preload;
+            },
+            preloadReady: (key) => act.stack?.preloadReady(key) ?? false,
+            now: () => Date.now(),
+            setTimer: (fn, ms) => setTimeout(fn, ms),
+            clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+            onState: (playing, resumeAt) => setPlaying(playing, resumeAt),
+        });
+    }
+
     /** Keep the control's pressed state, dot and tooltip in line with the session. */
     private refreshControl(act: Activation): void {
         const control = act.control;
         if (act.dead || !control) return;
         const open = session.panelOpen;
-        const anyLayer = settings.clouds || settings.radars || rainOn(settings);
         const message = healthMessage(session.health);
         control.setOpen(open);
-        control.setActive(!open && anyLayer);
+        control.setActive(!open && anyLayer());
         control.setTitle(message ? `Weather: ${message}` : 'Weather');
     }
 
@@ -394,6 +464,9 @@ export default class WeatherPlugin implements PluginInstance {
         const seq = ++act.seq;
 
         let tiles: Partial<Record<LayerSlot, string>> = {};
+        // The frame the hidden buffers load (Play only). It is optional: a failure just skips it.
+        const preloadKey = session.preload;
+        const preloadTiles: Partial<Record<LayerSlot, string>> = {};
         // A slot whose URL cannot be built keeps what is on the map; every other slot is
         // still applied, so a layer the user switched off is removed regardless.
         const failed: Partial<Record<LayerSlot, unknown>> = {};
@@ -403,6 +476,13 @@ export default class WeatherPlugin implements PluginInstance {
                 if (req) tiles[slot] = await tileTemplate(host, req);
             } catch (err) {
                 failed[slot] = err;
+            }
+            if (preloadKey === null) continue;
+            try {
+                const req = requestFor(slot, settings, session, preloadKey);
+                if (req) preloadTiles[slot] = await tileTemplate(host, req);
+            } catch {
+                // No preload for this slot; the shown frame is not affected.
             }
         }
 
@@ -415,6 +495,7 @@ export default class WeatherPlugin implements PluginInstance {
             if (old !== undefined && isSelected(slot, settings)) tiles[slot] = old;
         }
 
+        let preload: PreloadUrls | undefined = preloadKey === null ? undefined : { key: preloadKey, tiles: preloadTiles };
         const changed = SLOT_ORDER.some((s) => tiles[s] !== undefined && tiles[s] !== act.applied[s]);
         if (changed && !force && !act.monitor.gate()) {
             // Unhealthy relay: keep the URLs on the map, still apply removals and opacity.
@@ -424,13 +505,14 @@ export default class WeatherPlugin implements PluginInstance {
                 if (tiles[s] !== undefined && old !== undefined) held[s] = old;
             }
             tiles = held;
+            preload = undefined;
             act.queued = true;
         } else {
             act.queued = false;
         }
 
         try {
-            act.stack.sync(computeDesired(settings, session, tiles));
+            act.stack.sync(computeDesired(settings, session, tiles, preload));
             act.applied = { ...tiles };
         } catch (err) {
             console.error('[weather] Could not update the weather layers', err);
@@ -463,6 +545,10 @@ export default class WeatherPlugin implements PluginInstance {
 
         act.dead = true;
         act.seq++;
+        act.player?.dispose();
+        act.player = undefined;
+        bindPlayer(null);
+        setPlaying(false);
         this.removeEscape(act);
         for (const timer of act.intervals) clearInterval(timer);
         act.intervals = [];

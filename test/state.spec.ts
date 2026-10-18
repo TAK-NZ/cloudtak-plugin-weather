@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     settings, session, defaultSettings, rainOn, loadSettings, bindStorage, flushSave, toggleLayer, setOpacity, setPalette,
-    setCoverage, setRadarsPrecipType, setTileSize, setTimeZone, resetSettings, setFrame, setDraftFrame,
+    setCoverage, setRadarsPrecipType, setTileSize, setTimeZone, resetSettings, setFrame, setDraftFrame, setPlayForecast, setPlaying,
 } from '../lib/state.ts';
 import { STORAGE_KEY } from '../lib/constants.ts';
 import type { StorageLike } from '../lib/types.ts';
@@ -43,6 +43,7 @@ describe('defaults', () => {
             radarsPrecipType: false,
             tileSize: 512,
             timeZone: 'Pacific/Auckland',
+            playForecast: false,
         });
         expect(settings).toEqual(defaultSettings());
     });
@@ -183,6 +184,34 @@ describe('settings migration', () => {
         expect(store.setItem).toHaveBeenCalledTimes(1);
     });
 
+    it('upgrades version 1 and 2 objects to playForecast false, in the one write', () => {
+        for (const store of [v1({ clouds: true }), v2({ clouds: true })]) {
+            bindStorage(store);
+            expect(store.setItem).toHaveBeenCalledTimes(1);
+            const written = JSON.parse((store.setItem.mock.calls[0] as [string, string])[1]) as Record<string, unknown>;
+            expect(written).toMatchObject({ version: 3, clouds: true, playForecast: false });
+            expect(settings.playForecast).toBe(false);
+        }
+    });
+    it('a version 3 object without playForecast loads with false and is not rewritten', () => {
+        const { playForecast, ...stored } = defaultSettings();
+        void playForecast;
+        const store = memory(JSON.stringify({ ...stored, clouds: true }));
+        bindStorage(store);
+        expect(settings).toEqual({ ...defaultSettings(), clouds: true });
+        expect(store.setItem).not.toHaveBeenCalled();
+    });
+    it('round-trips playForecast and ignores a stored value that is not a boolean', () => {
+        expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: true }))).playForecast).toBe(true);
+        for (const junk of ['yes', 1, null, {}]) {
+            expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: junk }))).playForecast).toBe(false);
+        }
+    });
+    it('a version 2 object with extra junk keys still loads', () => {
+        const out = loadSettings(v2({ precip: 'precip', surprise: { a: 1 }, playForecast: 'maybe' }));
+        expect(out).toMatchObject({ version: 3, precipRegional: true, playForecast: false });
+        expect(out).not.toHaveProperty('surprise');
+    });
     it('reads a version 3 object as it is and does not rewrite it', () => {
         const stored = { ...defaultSettings(), precipRegional: true, precipGlobal: true };
         const store = memory(JSON.stringify(stored));
@@ -306,6 +335,22 @@ describe('setters', () => {
         expect(settings.timeZone).toBe('local');
     });
 
+    it('setPlayForecast stores a boolean, saves it and ignores anything else', () => {
+        const store = memory();
+        bindStorage(store);
+        setPlayForecast(true);
+        expect(settings.playForecast).toBe(true);
+        setPlayForecast('yes' as never);
+        setPlayForecast(undefined as never);
+        expect(settings.playForecast).toBe(true);
+        vi.advanceTimersByTime(1000);
+        expect(JSON.parse(store.data.get(STORAGE_KEY) as string).playForecast).toBe(true);
+    });
+    it('resetSettings restores playForecast false', () => {
+        setPlayForecast(true);
+        resetSettings();
+        expect(settings.playForecast).toBe(false);
+    });
     it('resetSettings restores defaults', () => {
         setRain('precip');
         toggleLayer('clouds', true);
@@ -393,6 +438,26 @@ describe('frame', () => {
         expect(JSON.parse(store.data.get(STORAGE_KEY) as string)).toEqual({ ...defaultSettings(), precipRegional: true });
     });
 
+    it('the play state starts idle, setPlaying keeps the resume time only while playing and drops the preload on stop', () => {
+        expect(session).toMatchObject({ playing: false, preload: null, resumeAt: null });
+        setPlaying(true, 5000);
+        session.preload = -7;
+        expect(session).toMatchObject({ playing: true, preload: -7, resumeAt: 5000 });
+        setPlaying(true);
+        expect(session).toMatchObject({ playing: true, preload: -7, resumeAt: null });
+        setPlaying(false, 9);
+        expect(session).toMatchObject({ playing: false, preload: null, resumeAt: null });
+    });
+    it('the play state is never written to storage', () => {
+        const store = memory();
+        bindStorage(store);
+        setPlaying(true, 1);
+        session.preload = 3;
+        setCoverage(true);
+        vi.advanceTimersByTime(1000);
+        const written = store.setItem.mock.calls.map((c) => String(c[1])).join('');
+        for (const word of ['playing', 'preload', 'resumeAt']) expect(written).not.toContain(word);
+    });
     it('setFrame alone writes nothing', () => {
         const store = memory();
         bindStorage(store);

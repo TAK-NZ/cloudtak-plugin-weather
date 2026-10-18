@@ -21,6 +21,8 @@ export interface WeatherSettings {
     radarsPrecipType: boolean;
     tileSize: 256 | 512;
     timeZone: TimeZoneSetting;
+    /** Play also steps through the Rain forecast (only with a Rain layer on). */
+    playForecast: boolean;
 }
 
 export interface RelayStatus {

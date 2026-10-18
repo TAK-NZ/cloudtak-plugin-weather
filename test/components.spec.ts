@@ -10,7 +10,8 @@ import LayerControls from '../lib/LayerControls.vue';
 import TimelineSlider from '../lib/TimelineSlider.vue';
 import WeatherBar from '../lib/WeatherBar.vue';
 import WeatherSettings from '../lib/WeatherSettings.vue';
-import { bindStorage, session, setFrame, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
+import { bindStorage, session, setFrame, setPlaying, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
+import { Player, bindPlayer } from '../lib/player.ts';
 import { ROUTE_NAME } from '../lib/constants.ts';
 import type { HealthState } from '../lib/types.ts';
 import { setRain } from './helpers.ts';
@@ -26,6 +27,8 @@ function reset(): void {
     session.panelOpen = false;
     session.snapshot = SNAPSHOT;
     session.health = { kind: 'ok' };
+    setPlaying(false);
+    bindPlayer(null);
     setTimeZone('UTC');
 }
 
@@ -276,11 +279,110 @@ describe('TimelineSlider', () => {
         expect(wrapper.find('[data-test=note]').exists()).toBe(false);
     });
 
-    it('has no Play button', () => {
-        setRain('precip');
-        wrapper = mount(TimelineSlider);
-        expect(wrapper.findAll('button').some((b) => /play/i.test(b.text() + (b.attributes('aria-label') ?? '')))).toBe(false);
-        expect(wrapper.html()).not.toMatch(/play/i);
+    describe('Play', () => {
+        /** A real Player on fake deps, so the button drives session.playing like in the plugin. */
+        function bind(): { player: Player; shows: [number, number | null][] } {
+            const shows: [number, number | null][] = [];
+            const player = new Player({
+                range: () => ({ first: -12, last: 0 }),
+                hasLayers: () => true,
+                frame: () => session.frame,
+                show: (frame, preload) => {
+                    shows.push([frame, preload]);
+                    setFrame(frame);
+                    session.preload = preload;
+                },
+                preloadReady: () => true,
+                now: () => Date.now(),
+                setTimer: (fn, ms) => setTimeout(fn, ms),
+                clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+                onState: (playing, resumeAt) => setPlaying(playing, resumeAt),
+            });
+            bindPlayer(player);
+            return { player, shows };
+        }
+        const play = () => wrapper!.get('[data-test=play]');
+
+        it('is an icon-only toggle button at the start of the row with a fixed accessible name', () => {
+            toggleLayer('clouds', true);
+            wrapper = mount(TimelineSlider);
+            expect(play().element.tagName).toBe('BUTTON');
+            expect(play().text()).toBe('');
+            expect(play().attributes('aria-label')).toBe('Play');
+            expect(play().attributes('aria-pressed')).toBe('false');
+            expect(play().attributes('title')).toBe('Play');
+            expect(wrapper.get('[data-test=timeline]').element.firstElementChild).toBe(play().element);
+        });
+        it('is disabled, with an explanation, when no layer is on', () => {
+            wrapper = mount(TimelineSlider);
+            expect(play().attributes('disabled')).toBeDefined();
+            expect(play().attributes('title')).toBe('Turn on a layer to play');
+        });
+        it('starts and pauses Play, and aria-pressed follows', async () => {
+            vi.useFakeTimers();
+            toggleLayer('clouds', true);
+            const { shows } = bind();
+            wrapper = mount(TimelineSlider);
+            // the settings save debounce is a timer of its own
+            const base = vi.getTimerCount();
+            await play().trigger('click');
+            expect(vi.getTimerCount()).toBe(base + 1);
+            expect(shows[0]).toEqual([-12, -11]);
+            expect(session.playing).toBe(true);
+            expect(play().attributes('aria-pressed')).toBe('true');
+            expect(play().attributes('title')).toBe('Pause');
+            expect(play().attributes('aria-label')).toBe('Play');
+            await play().trigger('click');
+            expect(session.playing).toBe(false);
+            expect(play().attributes('aria-pressed')).toBe('false');
+            expect(vi.getTimerCount()).toBe(base);
+        });
+        it('Space and Enter on the focused button activate it (a native button turns them into a click)', async () => {
+            toggleLayer('clouds', true);
+            wrapper = mount(TimelineSlider, { attachTo: document.body });
+            const el = play().element as HTMLButtonElement;
+            expect(el.type).toBe('button');
+            el.focus();
+            expect(document.activeElement).toBe(el);
+            const { player } = bind();
+            const toggle = vi.spyOn(player, 'start');
+            el.click();
+            expect(toggle).toHaveBeenCalledTimes(1);
+            player.stop('user');
+        });
+        it('dragging the slider, or pressing Now, stops Play first', async () => {
+            vi.useFakeTimers();
+            setRain('precip');
+            bind();
+            wrapper = mount(TimelineSlider);
+            const base = vi.getTimerCount();
+            await play().trigger('click');
+            expect(session.playing).toBe(true);
+            await input(-3);
+            expect(session.playing).toBe(false);
+            expect(session.preload).toBeNull();
+            expect(session.draftFrame).toBe(-3);
+
+            await play().trigger('click');
+            expect(session.playing).toBe(true);
+            await slider().trigger('pointerdown');
+            expect(session.playing).toBe(false);
+
+            setFrame(-5);
+            await play().trigger('click');
+            await wrapper.get('[data-test=now]').trigger('click');
+            expect(session.playing).toBe(false);
+            expect(session.frame).toBe(0);
+            expect(vi.getTimerCount()).toBeLessThanOrEqual(base + 1);
+            vi.runOnlyPendingTimers();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+        it('does nothing when no player is bound', async () => {
+            toggleLayer('clouds', true);
+            wrapper = mount(TimelineSlider);
+            await play().trigger('click');
+            expect(session.playing).toBe(false);
+        });
     });
 
     const HEALTH: [string, HealthState, string][] = [
@@ -330,6 +432,17 @@ describe('WeatherSettings', () => {
         expect(wrapper.find('input[type=radio][data-test^=rain]').exists()).toBe(false);
     });
 
+    it('offers Include forecast when playing (off by default) and says that Play loads more tiles', async () => {
+        wrapper = mount(WeatherSettings);
+        const box = wrapper.get('[data-test=play-forecast]');
+        expect((box.element as HTMLInputElement).checked).toBe(false);
+        expect(wrapper.text()).toContain('Include forecast when playing');
+        expect(wrapper.text()).toContain('Sharper (about 4x requests; Play loads more tiles)');
+        await box.setValue(true);
+        expect(settings.playForecast).toBe(true);
+        await box.setValue(false);
+        expect(settings.playForecast).toBe(false);
+    });
     it('holds the explanations and the Rainbow.ai link that the panel no longer shows', () => {
         wrapper = mount(WeatherSettings);
         const link = wrapper.get('[data-test=attribution-link]');
@@ -359,7 +472,7 @@ describe('WeatherBar', () => {
         const row = card.get('[data-test=row]');
         expect(layers.find('[data-test=layer-controls]').exists()).toBe(true);
         expect(row.find('[data-test=layer-controls]').exists()).toBe(false);
-        for (const t of ['now', 'slider', 'label', 'health', 'settings']) expect(row.find(`[data-test=${t}]`).exists()).toBe(true);
+        for (const t of ['play', 'now', 'slider', 'label', 'health', 'settings']) expect(row.find(`[data-test=${t}]`).exists()).toBe(true);
         // layers section comes first
         expect(layers.element.compareDocumentPosition(row.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(bar().find('[data-test=controls]').exists()).toBe(false);
