@@ -170,7 +170,7 @@ export default class WeatherPlugin implements PluginInstance {
                 path: ROUTE_PATH,
                 name: ROUTE_NAME,
                 component: {
-                    render: () => h(MenuTemplate, { name: 'Weather' }, {
+                    render: () => h(MenuTemplate, { name: 'Weather Settings' }, {
                         default: () => h(WeatherSettings),
                     }),
                 },
@@ -179,9 +179,9 @@ export default class WeatherPlugin implements PluginInstance {
 
             this.api.menu.add({
                 key: MENU_KEY,
-                label: 'Weather',
+                label: 'Weather Settings',
                 route: ROUTE_NAME,
-                tooltip: 'Weather',
+                tooltip: 'Weather Settings',
                 description: 'Rain, radar and cloud layers with forecast',
                 icon: IconWeather,
             });
@@ -391,7 +391,7 @@ export default class WeatherPlugin implements PluginInstance {
         const message = healthMessage(session.health);
         control.setOpen(open);
         control.setActive(!open && anyLayer());
-        control.setTitle(message ? `Weather: ${message}` : 'Weather');
+        control.setTitle(message ? `Weather Controls: ${message}` : 'Weather Controls');
     }
 
     /** Take over a status: server clock, per-layer latest and the anchor of the timeline. */

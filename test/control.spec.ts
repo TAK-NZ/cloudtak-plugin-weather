@@ -56,8 +56,8 @@ describe('markup', () => {
         const b = buttonOf();
         expect(b.type).toBe('button');
         expect(b.className).toBe('maplibregl-ctrl-icon');
-        expect(b.title).toBe('Weather');
-        expect(b.getAttribute('aria-label')).toBe('Weather');
+        expect(b.title).toBe('Weather Controls');
+        expect(b.getAttribute('aria-label')).toBe('Weather Controls');
         expect(b.getAttribute('aria-pressed')).toBe('false');
     });
 
@@ -115,9 +115,9 @@ describe('state', () => {
         control.setActive(false);
         expect(dot.style.display).toBe('none');
 
-        control.setTitle('Weather: Weather unavailable');
-        expect(buttonOf().title).toBe('Weather: Weather unavailable');
-        expect(buttonOf().getAttribute('aria-label')).toBe('Weather');
+        control.setTitle('Weather Controls: Weather unavailable');
+        expect(buttonOf().title).toBe('Weather Controls: Weather unavailable');
+        expect(buttonOf().getAttribute('aria-label')).toBe('Weather Controls');
     });
 
     it('focus() and focusWeatherControl() focus the button', () => {

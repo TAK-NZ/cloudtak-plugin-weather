@@ -13,6 +13,7 @@ const hostMock = vi.hoisted(() => ({
 vi.mock('../lib/host.ts', () => hostMock);
 
 import WeatherPlugin from '../index.ts';
+import MenuTemplate from '../lib/MenuTemplate.vue';
 import { bindStorage, flushSave, session, setFrame, setPlaying, settings, toggleLayer } from '../lib/state.ts';
 import { togglePlay } from '../lib/player.ts';
 import { snapshotAt } from '../lib/time.ts';
@@ -96,6 +97,17 @@ describe('lifecycle', () => {
         expect(host.fetch.mock.calls[0][0]).toBe(STATUS_URL);
     });
 
+    it('names the menu entry and the settings window "Weather Settings"', async () => {
+        const { instance, menuItems, routes } = await install(new EventedFakeMap());
+        await instance.enable();
+        await plugin?.pending;
+        expect(menuItems).toHaveLength(1);
+        expect(menuItems[0].label).toBe('Weather Settings');
+        expect(menuItems[0].tooltip).toBe('Weather Settings');
+        const vnode = routes[0].component?.render() as { type: unknown; props: { name: string } };
+        expect(vnode.type).toBe(MenuTemplate);
+        expect(vnode.props.name).toBe('Weather Settings');
+    });
     it.each([
         ['status 404', () => reply(404)],
         ['status 401', () => reply(401)],
@@ -414,12 +426,12 @@ describe('weather control and bottom bar', () => {
 
     it('puts the relay health in the tooltip, not in the accessible name', async () => {
         await running();
-        expect(controlButton()?.title).toBe('Weather');
+        expect(controlButton()?.title).toBe('Weather Controls');
         session.health = { kind: 'degraded', since: 0, status: 502 };
-        expect(controlButton()?.title).toBe('Weather: Weather service unavailable');
-        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather');
+        expect(controlButton()?.title).toBe('Weather Controls: Weather service unavailable');
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls');
         session.health = { kind: 'ok' };
-        expect(controlButton()?.title).toBe('Weather');
+        expect(controlButton()?.title).toBe('Weather Controls');
     });
 });
 

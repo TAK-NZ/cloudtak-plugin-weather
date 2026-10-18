@@ -143,8 +143,8 @@ export class WeatherControl implements IControlLike {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'maplibregl-ctrl-icon';
-        button.title = 'Weather';
-        button.setAttribute('aria-label', 'Weather');
+        button.title = 'Weather Controls';
+        button.setAttribute('aria-label', 'Weather Controls');
         button.setAttribute('aria-pressed', 'false');
         button.addEventListener('click', () => this.opts.onToggle());
 
@@ -243,7 +243,7 @@ export class WeatherControl implements IControlLike {
         if (this.dot) this.dot.style.display = active ? '' : 'none';
     }
 
-    /** The tooltip; the accessible name stays 'Weather'. */
+    /** The tooltip; the accessible name stays 'Weather Controls'. */
     setTitle(title: string): void {
         if (this.button) this.button.title = title;
     }

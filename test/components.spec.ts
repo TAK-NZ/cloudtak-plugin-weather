@@ -491,7 +491,10 @@ describe('WeatherBar', () => {
         const row = card.get('[data-test=row]');
         expect(layers.find('[data-test=layer-controls]').exists()).toBe(true);
         expect(row.find('[data-test=layer-controls]').exists()).toBe(false);
-        for (const t of ['play', 'now', 'slider', 'label', 'health', 'settings']) expect(row.find(`[data-test=${t}]`).exists()).toBe(true);
+        for (const t of ['play', 'now', 'slider', 'label', 'health']) expect(row.find(`[data-test=${t}]`).exists()).toBe(true);
+        // the settings gear is part of the chip row, not of the timeline row
+        expect(row.find('[data-test=settings]').exists()).toBe(false);
+        expect(layers.get('[data-test=layer-controls]').find('[data-test=settings]').exists()).toBe(true);
         // layers section comes first
         expect(layers.element.compareDocumentPosition(row.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(bar().find('[data-test=controls]').exists()).toBe(false);
@@ -552,6 +555,21 @@ describe('WeatherBar', () => {
         expect(session.panelOpen).toBe(true);
     });
 
+    it('the gear ends the chip row, in normal flow, named Weather Settings, before Play in the tab order', () => {
+        wrapper = mount(WeatherBar);
+        const chips = bar().get('[data-test=layer-controls]');
+        const gear = chips.get('[data-test=settings]');
+        expect(gear.attributes('aria-label')).toBe('Weather Settings');
+        expect(gear.attributes('title')).toBe('Weather Settings');
+        expect(gear.classes()).toContain('ms-auto');
+        expect(gear.element.parentElement).toBe(chips.element);
+        expect(chips.element.lastElementChild).toBe(gear.element);
+        expect(gear.attributes('style')).not.toContain('position');
+        const order = [...bar().element.querySelectorAll('button, input')].map((e) => e.getAttribute('data-test'));
+        expect(order).toEqual([
+            'toggle-clouds', 'toggle-precip', 'toggle-precip-global', 'toggle-radars', 'settings', 'play', 'now', 'slider',
+        ]);
+    });
     it('does not handle Escape itself (the plugin does, at document level)', async () => {
         session.panelOpen = true;
         wrapper = mount(WeatherBar, { attachTo: document.body });

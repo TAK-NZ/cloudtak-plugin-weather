@@ -19,7 +19,22 @@
                 class='pt-2'
                 data-test='layers'
             >
-                <LayerControls />
+                <LayerControls>
+                    <button
+                        type='button'
+                        class='btn btn-icon p-0 d-inline-flex align-items-center justify-content-center ms-auto flex-shrink-0'
+                        style='width: 44px; height: 44px; flex: 0 0 44px;'
+                        aria-label='Weather Settings'
+                        title='Weather Settings'
+                        data-test='settings'
+                        @click='openSettings'
+                    >
+                        <IconSettings
+                            :size='24'
+                            stroke='1.5'
+                        />
+                    </button>
+                </LayerControls>
             </div>
             <div
                 class='d-flex align-items-center gap-2 flex-shrink-0'
@@ -27,20 +42,6 @@
                 data-test='row'
             >
                 <TimelineSlider class='flex-grow-1' />
-                <button
-                    type='button'
-                    class='btn btn-icon p-0 d-inline-flex align-items-center justify-content-center'
-                    style='width: 44px; height: 44px; flex: 0 0 44px;'
-                    aria-label='Weather settings'
-                    title='Weather settings'
-                    data-test='settings'
-                    @click='openSettings'
-                >
-                    <IconSettings
-                        :size='24'
-                        stroke='1.5'
-                    />
-                </button>
             </div>
         </div>
     </div>

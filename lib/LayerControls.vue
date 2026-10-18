@@ -73,6 +73,7 @@
                 class='visually-hidden'
             >, latest frame only</span>
         </button>
+        <slot />
     </div>
 </template>
 

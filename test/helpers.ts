@@ -129,6 +129,10 @@ export function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; r
 export interface FakeApi {
     api: PluginAPI;
     calls: string[];
+    /** The items passed to menu.add. */
+    menuItems: { key: string; label?: string; tooltip?: string }[];
+    /** The route objects passed to routes.add. */
+    routes: { name?: unknown; component?: { render: () => unknown } }[];
     /** Swap the map `api.map` returns, or an Error to make `api.map` throw. */
     setMap(map: EventedFakeMap | Error): void;
 }
@@ -136,16 +140,20 @@ export interface FakeApi {
 /** Records every menu / route / bottom-bar / router call as a string. */
 export function makeFakeApi(initial: EventedFakeMap | Error = new EventedFakeMap()): FakeApi {
     const calls: string[] = [];
+    const menuItems: FakeApi['menuItems'] = [];
+    const routes: FakeApi['routes'] = [];
     let current: EventedFakeMap | Error = initial;
 
     const api = {
         routes: {
-            add: (route: { name?: unknown }, parent?: string) => {
+            add: (route: FakeApi['routes'][number], parent?: string) => {
+                routes.push(route);
                 calls.push(`routes.add:${String(route.name)}:${parent}`);
             },
         },
         menu: {
-            add: (item: { key: string }) => {
+            add: (item: FakeApi['menuItems'][number]) => {
+                menuItems.push(item);
                 calls.push(`menu.add:${item.key}`);
             },
             remove: (key: string) => {
@@ -174,6 +182,8 @@ export function makeFakeApi(initial: EventedFakeMap | Error = new EventedFakeMap
     return {
         api: api as unknown as PluginAPI,
         calls,
+        menuItems,
+        routes,
         setMap: (map) => {
             current = map;
         },
