@@ -1,11 +1,32 @@
-import type { Host, RelayStatus, TileRequest } from './types.ts';
-import { API_VERSIONS_SUPPORTED, STATUS_PATH, STATUS_TIMEOUT_MS, TILE_PATH } from './constants.ts';
+import type { Host, RelayStatus, TileRequest, WeatherLayer } from './types.ts';
+import { API_VERSIONS_SUPPORTED, STATUS_PATH, STATUS_TIMEOUT_MS, TILE_PATH, WEATHER_LAYERS } from './constants.ts';
 
 export type StatusReason = 'ok' | 'disabled' | 'not-found' | 'unauthorized' | 'network' | 'invalid' | 'unsupported';
 
 export interface StatusResult {
     status: RelayStatus | null;
     reason: StatusReason;
+}
+
+/**
+ * Tolerant: `latest` is optional and every entry is checked on its own. A bad entry
+ * (or a bad `latest`) is dropped and never fails the status.
+ */
+function parseLatest(raw: unknown): Partial<Record<WeatherLayer, number>> | undefined {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+    const out: Partial<Record<WeatherLayer, number>> = {};
+    for (const layer of WEATHER_LAYERS) {
+        const entry = (raw as Record<string, unknown>)[layer];
+        const value = typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+            ? (entry as Record<string, unknown>).snapshot
+            : undefined;
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0 && value % 600 === 0) out[layer] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function positiveInt(v: unknown): number | undefined {
+    return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
 }
 
 export function parseStatus(raw: unknown): RelayStatus | null {
@@ -18,13 +39,20 @@ export function parseStatus(raw: unknown): RelayStatus | null {
     if (!Number.isInteger(o.snapshot) || (o.snapshot as number) % 600 !== 0) return null;
     if (!Array.isArray(o.layers) || !o.layers.every((l) => typeof l === 'string')) return null;
 
-    return {
+    const status: RelayStatus = {
         apiVersion: o.apiVersion as number,
         enabled: o.enabled,
         serverTime: o.serverTime as number,
         snapshot: o.snapshot as number,
         layers: [...(o.layers as string[])],
     };
+    const latest = parseLatest(o.latest);
+    if (latest) status.latest = latest;
+    const step = positiveInt(o.stepSeconds);
+    if (step !== undefined) status.stepSeconds = step;
+    const window = positiveInt(o.windowSeconds);
+    if (window !== undefined) status.windowSeconds = window;
+    return status;
 }
 
 export function isSupported(s: RelayStatus): boolean {

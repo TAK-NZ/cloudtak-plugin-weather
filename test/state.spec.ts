@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-    settings, session, defaultSettings, loadSettings, bindStorage, flushSave, setPrecip, toggleLayer, setOpacity, setPalette,
+    settings, session, defaultSettings, rainOn, loadSettings, bindStorage, flushSave, toggleLayer, setOpacity, setPalette,
     setCoverage, setRadarsPrecipType, setTileSize, setTimeZone, resetSettings, setFrame, setDraftFrame,
 } from '../lib/state.ts';
 import { STORAGE_KEY } from '../lib/constants.ts';
 import type { StorageLike } from '../lib/types.ts';
+import { setRain } from './helpers.ts';
 
 function memory(initial?: string): StorageLike & { data: Map<string, string>; setItem: ReturnType<typeof vi.fn> } {
     const data = new Map<string, string>();
@@ -21,6 +22,7 @@ beforeEach(() => {
     bindStorage(memory());
     session.frame = 0;
     session.draftFrame = null;
+    session.latest = {};
 });
 
 afterEach(() => {
@@ -30,11 +32,12 @@ afterEach(() => {
 describe('defaults', () => {
     it('are all layers off, 512 tiles and New Zealand time', () => {
         expect(defaultSettings()).toEqual({
-            version: 2,
-            precip: 'none',
+            version: 3,
             clouds: false,
+            precipRegional: false,
+            precipGlobal: false,
             radars: false,
-            opacity: { clouds: 0.5, precip: 0.7, radars: 0.7 },
+            opacity: { clouds: 0.5, 'precip-global': 0.7, precip: 0.7, radars: 0.7 },
             palette: { precip: '4', radars: '4' },
             coverage: false,
             radarsPrecipType: false,
@@ -66,7 +69,8 @@ describe('loadSettings', () => {
     });
 
     it('returns defaults for an unknown version', () => {
-        expect(loadSettings(stored({ ...defaultSettings(), version: 3, clouds: true }))).toEqual(defaultSettings());
+        expect(loadSettings(stored({ ...defaultSettings(), version: 4, clouds: true }))).toEqual(defaultSettings());
+        expect(loadSettings(stored({ ...defaultSettings(), version: '3', clouds: true }))).toEqual(defaultSettings());
         expect(loadSettings(stored({ ...defaultSettings(), version: '2', clouds: true }))).toEqual(defaultSettings());
         expect(loadSettings(stored({ ...defaultSettings(), version: null, clouds: true }))).toEqual(defaultSettings());
         expect(loadSettings(stored({ ...defaultSettings(), version: NaN, clouds: true }))).toEqual(defaultSettings());
@@ -75,7 +79,7 @@ describe('loadSettings', () => {
     it('treats an object with no version as old and migrates it', () => {
         const out = loadSettings(stored({ clouds: true, palette: { precip: '0', radars: '0' } }));
         expect(out).toEqual({ ...defaultSettings(), clouds: true });
-        expect(out.version).toBe(2);
+        expect(out.version).toBe(3);
     });
 
     it('gives palette 4 for Rain and Radar on fresh storage', () => {
@@ -83,8 +87,8 @@ describe('loadSettings', () => {
     });
 
     it('keeps valid stored values', () => {
-        const s = { ...defaultSettings(), precip: 'precip-global', clouds: true, radars: true, coverage: true, radarsPrecipType: true, tileSize: 256, timeZone: 'UTC',
-            opacity: { clouds: 0.3, precip: 0.9, radars: 0.25 }, palette: { precip: 'dbz_u8', radars: '4' } };
+        const s = { ...defaultSettings(), precipGlobal: true, precipRegional: true, clouds: true, radars: true, coverage: true, radarsPrecipType: true, tileSize: 256, timeZone: 'UTC',
+            opacity: { clouds: 0.3, 'precip-global': 0.6, precip: 0.9, radars: 0.25 }, palette: { precip: 'dbz_u8', radars: '4' } };
         expect(loadSettings(stored(s))).toEqual(s);
     });
 
@@ -94,11 +98,16 @@ describe('loadSettings', () => {
             tileSize: 300, timeZone: 'Mars/Base', opacity: 'high', palette: { precip: 11, radars: 'x' },
         }));
         expect(out).toEqual(defaultSettings());
+        const v3 = loadSettings(stored({
+            version: 3, precipRegional: 'yes', precipGlobal: 1, clouds: 'yes', radars: 1, coverage: null, radarsPrecipType: [],
+            tileSize: 300, timeZone: 'Mars/Base', opacity: 'high', palette: { precip: 11, radars: 'x' },
+        }));
+        expect(v3).toEqual(defaultSettings());
     });
 
     it('clamps out-of-range opacity and ignores non-numbers', () => {
         const out = loadSettings(stored({ version: 1, opacity: { clouds: 5, precip: -3, radars: 'a' } }));
-        expect(out.opacity).toEqual({ clouds: 1, precip: 0.1, radars: 0.7 });
+        expect(out.opacity).toEqual({ clouds: 1, 'precip-global': 0.1, precip: 0.1, radars: 0.7 });
         expect(loadSettings(stored({ version: 1, opacity: { clouds: null, precip: NaN } })).opacity).toEqual(defaultSettings().opacity);
     });
 
@@ -111,12 +120,76 @@ describe('loadSettings', () => {
     it('keeps valid fields next to invalid ones', () => {
         const out = loadSettings(stored({ version: 1, clouds: true, precip: 'nonsense' }));
         expect(out.clouds).toBe(true);
-        expect(out.precip).toBe('none');
+        expect([out.precipRegional, out.precipGlobal]).toEqual([false, false]);
     });
 });
 
+/** An object as versions 1 and 2 stored it: Rain was one mode. */
+function legacy(version: number | undefined, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+        ...(version === undefined ? {} : { version }),
+        precip: 'none',
+        clouds: false,
+        radars: false,
+        opacity: { clouds: 0.5, precip: 0.7, radars: 0.7 },
+        palette: { precip: '0', radars: '0' },
+        coverage: false,
+        radarsPrecipType: false,
+        tileSize: 512,
+        timeZone: 'Pacific/Auckland',
+        ...over,
+    };
+}
+
 describe('settings migration', () => {
-    const v1 = (o: Record<string, unknown>) => memory(JSON.stringify({ ...defaultSettings(), version: 1, ...o }));
+    const v1 = (o: Record<string, unknown>) => memory(JSON.stringify(legacy(1, o)));
+    const v2 = (o: Record<string, unknown>) => memory(JSON.stringify(legacy(2, o)));
+
+    it.each([
+        ['none', false, false],
+        ['precip', true, false],
+        ['precip-global', false, true],
+        ['garbage', false, false],
+    ])('turns the version 2 Rain mode %s into Regional=%s, Global=%s', (mode, regional, global) => {
+        const out = loadSettings(v2({ precip: mode, clouds: true }));
+        expect(out.version).toBe(3);
+        expect(out.precipRegional).toBe(regional);
+        expect(out.precipGlobal).toBe(global);
+        expect(out.clouds).toBe(true);
+        expect(out).not.toHaveProperty('precip');
+    });
+
+    it('turns the version 1 and unversioned Rain mode into the two switches as well', () => {
+        expect(loadSettings(v1({ precip: 'precip-global' }))).toMatchObject({ precipRegional: false, precipGlobal: true });
+        const unversioned = memory(JSON.stringify(legacy(undefined, { precip: 'precip' })));
+        expect(loadSettings(unversioned)).toMatchObject({ version: 3, precipRegional: true, precipGlobal: false });
+    });
+
+    it('gives Global Rain the stored Rain opacity and keeps the shared Rain palette', () => {
+        const out = loadSettings(v2({ precip: 'precip-global', opacity: { clouds: 0.4, precip: 0.35, radars: 0.9 }, palette: { precip: '3', radars: '0' } }));
+        expect(out.opacity).toEqual({ clouds: 0.4, 'precip-global': 0.35, precip: 0.35, radars: 0.9 });
+        expect(out.palette).toEqual({ precip: '3', radars: '0' });
+    });
+
+    it('writes a version 2 object once, immediately, as version 3', () => {
+        const store = v2({ precip: 'precip', clouds: true, tileSize: 256 });
+        bindStorage(store);
+        expect(store.setItem).toHaveBeenCalledTimes(1);
+        const written = JSON.parse((store.setItem.mock.calls[0] as [string, string])[1]) as Record<string, unknown>;
+        expect(written).toMatchObject({ version: 3, precipRegional: true, precipGlobal: false, clouds: true, tileSize: 256 });
+        expect(written).not.toHaveProperty('precip');
+        expect(settings.precipRegional).toBe(true);
+        bindStorage(store);
+        expect(store.setItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads a version 3 object as it is and does not rewrite it', () => {
+        const stored = { ...defaultSettings(), precipRegional: true, precipGlobal: true };
+        const store = memory(JSON.stringify(stored));
+        bindStorage(store);
+        expect(settings).toEqual(stored);
+        expect(store.setItem).not.toHaveBeenCalled();
+    });
 
     it('moves palette 0 to 4 and keeps every other field', () => {
         const store = v1({
@@ -125,10 +198,10 @@ describe('settings migration', () => {
         expect(loadSettings(store)).toEqual({
             ...defaultSettings(),
             clouds: true,
-            opacity: { clouds: 0.5, precip: 0.3, radars: 0.7 },
+            opacity: { clouds: 0.5, 'precip-global': 0.3, precip: 0.3, radars: 0.7 },
             palette: { precip: '4', radars: '4' },
             tileSize: 256,
-            version: 2,
+            version: 3,
         });
     });
 
@@ -141,7 +214,8 @@ describe('settings migration', () => {
         expect(loadSettings(v1({ palette: { precip: '3', radars: 'dbz_u8' } })).palette).toEqual({ precip: '3', radars: 'dbz_u8' });
     });
 
-    it('keeps palette 0 in a version 2 object', () => {
+    it('keeps palette 0 in a version 2 object and in a version 3 object', () => {
+        expect(loadSettings(v2({})).palette).toEqual({ precip: '0', radars: '0' });
         const store = memory(JSON.stringify({ ...defaultSettings(), palette: { precip: '0', radars: '0' } }));
         expect(loadSettings(store).palette).toEqual({ precip: '0', radars: '0' });
         bindStorage(store);
@@ -169,22 +243,32 @@ describe('settings migration', () => {
         store.setItem.mockImplementation(() => { throw new Error('quota'); });
         expect(() => bindStorage(store)).not.toThrow();
         expect(settings.palette).toEqual({ precip: '4', radars: '4' });
-        expect(settings.version).toBe(2);
+        expect(settings.version).toBe(3);
     });
 });
 
 describe('setters', () => {
-    it('rain modes are mutually exclusive by construction', () => {
-        setPrecip('precip');
-        expect(settings.precip).toBe('precip');
-        setPrecip('precip-global');
-        expect(settings.precip).toBe('precip-global');
-        setPrecip('none');
-        expect(settings.precip).toBe('none');
+    it('Rain Regional and Rain Global are independent switches', () => {
+        toggleLayer('precipRegional');
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([true, false]);
+        toggleLayer('precipGlobal');
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([true, true]);
+        toggleLayer('precipRegional', false);
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([false, true]);
+        toggleLayer('precipGlobal');
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([false, false]);
+    });
+
+    it('rainOn is true when either Rain layer is on', () => {
+        expect(rainOn(settings)).toBe(false);
+        toggleLayer('precipGlobal', true);
+        expect(rainOn(settings)).toBe(true);
+        toggleLayer('precipRegional', true);
+        toggleLayer('precipGlobal', false);
+        expect(rainOn(settings)).toBe(true);
     });
 
     it('ignores invalid values', () => {
-        setPrecip('bogus' as 'none');
         setPalette('precip', 'zz' as '0');
         setTileSize(300 as 256);
         setTimeZone('Mars' as 'UTC');
@@ -207,6 +291,9 @@ describe('setters', () => {
         expect(settings.opacity.precip).toBe(1);
         setOpacity('precip', 0);
         expect(settings.opacity.precip).toBe(0.1);
+        setOpacity('precip-global', 0.4);
+        expect(settings.opacity['precip-global']).toBe(0.4);
+        expect(settings.opacity.precip).toBe(0.1);
         setPalette('radars', '9');
         setCoverage(true);
         setRadarsPrecipType(true);
@@ -220,7 +307,7 @@ describe('setters', () => {
     });
 
     it('resetSettings restores defaults', () => {
-        setPrecip('precip');
+        setRain('precip');
         toggleLayer('clouds', true);
         setOpacity('clouds', 0.9);
         resetSettings();
@@ -230,7 +317,8 @@ describe('setters', () => {
 });
 
 describe('frame', () => {
-    it('setFrame clamps and clears the draft', () => {
+    it('setFrame clamps to -12..24 with Rain on and clears the draft', () => {
+        setRain('precip');
         setDraftFrame(7);
         expect(session.draftFrame).toBe(7);
         setFrame(12);
@@ -238,35 +326,77 @@ describe('frame', () => {
         expect(session.draftFrame).toBeNull();
         setFrame(99);
         expect(session.frame).toBe(24);
+        setFrame(-99);
+        expect(session.frame).toBe(-12);
+        setFrame(-13);
+        expect(session.frame).toBe(-12);
         setFrame(NaN);
         expect(session.frame).toBe(0);
     });
-
-    it('setDraftFrame clamps and accepts null', () => {
-        setDraftFrame(-4);
+    it('without Rain the frame stops at Now but the past stays selectable', () => {
+        setFrame(6);
+        expect(session.frame).toBe(0);
+        setFrame(-6);
+        expect(session.frame).toBe(-6);
+        setDraftFrame(9);
         expect(session.draftFrame).toBe(0);
+    });
+    it('setDraftFrame clamps and accepts null', () => {
+        setRain('precip');
+        setDraftFrame(-40);
+        expect(session.draftFrame).toBe(-12);
+        setDraftFrame(40);
+        expect(session.draftFrame).toBe(24);
         setDraftFrame(null);
         expect(session.draftFrame).toBeNull();
     });
-
+    it('turning Rain off ends a forecast frame at Now and keeps a past frame', () => {
+        setRain('precip');
+        setFrame(6);
+        setRain('none');
+        expect(session.frame).toBe(0);
+        setRain('precip');
+        setFrame(-4);
+        setRain('none');
+        expect(session.frame).toBe(-4);
+    });
+    it('either Rain layer allows the forecast, and the last Rain layer ending it returns to Now', () => {
+        setRain('precip-global');
+        setFrame(24);
+        expect(session.frame).toBe(24);
+        toggleLayer('precipRegional', true);
+        toggleLayer('precipGlobal', false);
+        expect(session.frame).toBe(24);
+        setRain('both');
+        toggleLayer('precipRegional', false);
+        expect(session.frame).toBe(24);
+        toggleLayer('precipGlobal', false);
+        expect(session.frame).toBe(0);
+        setFrame(24);
+        expect(session.frame).toBe(0);
+    });
+    it('the session starts without per-layer latest', () => {
+        expect(session.latest).toEqual({});
+    });
     it('is never written to storage', () => {
         const store = memory();
         bindStorage(store);
-        setPrecip('precip');
+        setRain('precip');
         setFrame(18);
         setDraftFrame(20);
+        session.latest = { precip: 600 };
         vi.advanceTimersByTime(1000);
         const written = store.setItem.mock.calls.map((c) => String(c[1])).join('');
         expect(written).not.toContain('frame');
         expect(written).not.toContain('draft');
         expect(written).not.toContain('snapshot');
-        expect(JSON.parse(store.data.get(STORAGE_KEY) as string)).toEqual({ ...defaultSettings(), precip: 'precip' });
+        expect(JSON.parse(store.data.get(STORAGE_KEY) as string)).toEqual({ ...defaultSettings(), precipRegional: true });
     });
 
     it('setFrame alone writes nothing', () => {
         const store = memory();
         bindStorage(store);
-        setFrame(5);
+        setFrame(-5);
         vi.advanceTimersByTime(1000);
         expect(store.setItem).not.toHaveBeenCalled();
     });
@@ -276,7 +406,7 @@ describe('persistence', () => {
     it('writes once, 300 ms after the last change', () => {
         const store = memory();
         bindStorage(store);
-        setPrecip('precip');
+        setRain('precip');
         vi.advanceTimersByTime(200);
         toggleLayer('clouds', true);
         vi.advanceTimersByTime(299);
@@ -285,7 +415,7 @@ describe('persistence', () => {
         expect(store.setItem).toHaveBeenCalledTimes(1);
         const [key, value] = store.setItem.mock.calls[0] as [string, string];
         expect(key).toBe(STORAGE_KEY);
-        expect(JSON.parse(value)).toMatchObject({ version: 2, precip: 'precip', clouds: true });
+        expect(JSON.parse(value)).toMatchObject({ version: 3, precipRegional: true, precipGlobal: false, clouds: true });
     });
 
     it('flushSave writes immediately', () => {
@@ -300,25 +430,25 @@ describe('persistence', () => {
         const store = memory();
         store.setItem.mockImplementation(() => { throw new Error('quota'); });
         bindStorage(store);
-        setPrecip('precip');
+        setRain('precip');
         expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
 
         bindStorage(null);
-        setPrecip('none');
+        setRain('none');
         expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
     });
 
     it('bindStorage loads what a previous session saved', () => {
         const store = memory();
         bindStorage(store);
-        setPrecip('precip-global');
+        setRain('precip-global');
         toggleLayer('radars', true);
         flushSave();
 
         resetSettings();
         flushSave();
-        bindStorage(memory(JSON.stringify({ ...defaultSettings(), precip: 'precip-global', radars: true })));
-        expect(settings.precip).toBe('precip-global');
+        bindStorage(memory(JSON.stringify({ ...defaultSettings(), precipGlobal: true, radars: true })));
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([false, true]);
         expect(settings.radars).toBe(true);
     });
 });

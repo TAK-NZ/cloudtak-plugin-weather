@@ -1,11 +1,10 @@
 import { reactive } from 'vue';
 import type {
-    LayerSlot, PaletteCode, PrecipMode, RelayStatus, HealthState, StorageLike, TimeZoneSetting, WeatherSettings,
+    LayerSlot, PaletteCode, RelayStatus, HealthState, StorageLike, TimeZoneSetting, ToggleKey, WeatherLayer, WeatherSettings,
 } from './types.ts';
 import { PALETTES, SETTINGS_VERSION, STORAGE_KEY } from './constants.ts';
-import { clampFrame, clock, debounce, snapshotAt } from './time.ts';
+import { clampFrame, clock, debounce, frameBounds, snapshotAt } from './time.ts';
 
-const PRECIP_MODES: readonly PrecipMode[] = ['none', 'precip', 'precip-global'];
 const TIME_ZONES: readonly TimeZoneSetting[] = ['Pacific/Auckland', 'UTC', 'local'];
 const OPACITY_MIN = 0.1;
 const OPACITY_MAX = 1;
@@ -14,10 +13,11 @@ const SAVE_DELAY_MS = 300;
 export function defaultSettings(): WeatherSettings {
     return {
         version: SETTINGS_VERSION,
-        precip: 'none',
         clouds: false,
+        precipRegional: false,
+        precipGlobal: false,
         radars: false,
-        opacity: { clouds: 0.5, precip: 0.7, radars: 0.7 },
+        opacity: { clouds: 0.5, 'precip-global': 0.7, precip: 0.7, radars: 0.7 },
         palette: { precip: '4', radars: '4' },
         coverage: false,
         radarsPrecipType: false,
@@ -28,6 +28,11 @@ export function defaultSettings(): WeatherSettings {
 
 export function clampOpacity(v: number): number {
     return Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, v));
+}
+
+/** Whether any Rain layer (Regional or Global) is on: only Rain has a forecast. */
+export function rainOn(s: Pick<WeatherSettings, 'precipRegional' | 'precipGlobal'>): boolean {
+    return s.precipRegional || s.precipGlobal;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -48,15 +53,17 @@ function opacity(v: unknown, fallback: number): number {
 
 interface Stored {
     settings: WeatherSettings;
-    /** True when an older (version 1 or unversioned) object was upgraded and should be written back. */
+    /** True when an older (unversioned, 1 or 2) object was upgraded and should be written back. */
     migrated: boolean;
 }
 
 /**
  * Read and sanitise stored settings. Any non-string result of getItem (null, or
  * undefined as the test stub returns) counts as absent; anything unusable gives defaults.
- * A missing or 1 version is an old object: it is sanitised and migrated to the current
- * version. Version 2 is current. Any other version gives defaults.
+ * A missing, 1 or 2 version is an old object: it is sanitised and migrated to the current
+ * version. Version 3 is current. Any other version gives defaults.
+ * Versions up to 2 stored Rain as one mode ('none' | 'precip' | 'precip-global'); it becomes
+ * the two Rain switches, and the Global Rain opacity starts as the Rain opacity.
  */
 function readStored(from: StorageLike | null | undefined): Stored {
     const d = defaultSettings();
@@ -78,20 +85,24 @@ function readStored(from: StorageLike | null | undefined): Stored {
     }
     if (!isRecord(parsed)) return fallback;
 
-    const old = parsed.version === undefined || parsed.version === 1;
+    const oldPalette = parsed.version === undefined || parsed.version === 1;
+    const old = oldPalette || parsed.version === 2;
     if (!old && parsed.version !== SETTINGS_VERSION) return fallback;
 
     const op = isRecord(parsed.opacity) ? parsed.opacity : {};
     const pal = isRecord(parsed.palette) ? parsed.palette : {};
 
+    const precipOpacity = opacity(op.precip, d.opacity.precip);
     const out: WeatherSettings = {
         version: SETTINGS_VERSION,
-        precip: oneOf(parsed.precip, PRECIP_MODES, d.precip),
         clouds: bool(parsed.clouds, d.clouds),
+        precipRegional: old ? parsed.precip === 'precip' : bool(parsed.precipRegional, d.precipRegional),
+        precipGlobal: old ? parsed.precip === 'precip-global' : bool(parsed.precipGlobal, d.precipGlobal),
         radars: bool(parsed.radars, d.radars),
         opacity: {
             clouds: opacity(op.clouds, d.opacity.clouds),
-            precip: opacity(op.precip, d.opacity.precip),
+            'precip-global': old ? precipOpacity : opacity(op['precip-global'], d.opacity['precip-global']),
+            precip: precipOpacity,
             radars: opacity(op.radars, d.opacity.radars),
         },
         palette: {
@@ -104,7 +115,7 @@ function readStored(from: StorageLike | null | undefined): Stored {
         timeZone: oneOf(parsed.timeZone, TIME_ZONES, d.timeZone),
     };
 
-    if (old) {
+    if (oldPalette) {
         // Version 1 defaulted both palettes to '0'. Move those to the new default '4'.
         // Accepted trade-off: a '0' the user chose on purpose under version 1 cannot be
         // told apart from the old default, so it is migrated too. Version 2 keeps '0'.
@@ -148,11 +159,14 @@ export const settings = reactive<WeatherSettings>(initial.settings);
 
 export interface Session {
     panelOpen: boolean;
-    /** Committed forecast frame, 0..24. Never persisted. */
+    /** Committed frame on the timeline: -12 (2 h ago) .. 0 (Now) .. 24 (+4 h, Rain only). Never persisted. */
     frame: number;
     /** Frame under the slider thumb while dragging. */
     draftFrame: number | null;
+    /** The anchor of the timeline (frame 0): the newest per-layer latest snapshot. */
     snapshot: number;
+    /** Newest snapshot per layer as reported by the relay (empty for a relay without `latest`). */
+    latest: Partial<Record<WeatherLayer, number>>;
     status: RelayStatus | null;
     health: HealthState;
 }
@@ -163,6 +177,7 @@ export const session = reactive<Session>({
     frame: 0,
     draftFrame: null,
     snapshot: snapshotAt(clock.now()),
+    latest: {},
     status: null,
     health: { kind: 'ok' },
 });
@@ -189,14 +204,10 @@ export function flushSave(): void {
     save.flush();
 }
 
-export function setPrecip(mode: PrecipMode): void {
-    if (!PRECIP_MODES.includes(mode)) return;
-    settings.precip = mode;
-    save();
-}
-
-export function toggleLayer(layer: 'clouds' | 'radars', value?: boolean): void {
+export function toggleLayer(layer: ToggleKey, value?: boolean): void {
     settings[layer] = value ?? !settings[layer];
+    // Without Rain there is no forecast to show.
+    if (!rainOn(settings)) setFrame(Math.min(session.frame, 0));
     save();
 }
 
@@ -239,12 +250,17 @@ export function resetSettings(): void {
     save();
 }
 
+/** Highest selectable frame: the forecast exists for Rain only. */
+function frameMax(): number {
+    return frameBounds(rainOn(settings)).max;
+}
+
 /** The only writer of session.frame. */
 export function setFrame(i: number): void {
-    session.frame = clampFrame(i);
+    session.frame = clampFrame(i, frameMax());
     session.draftFrame = null;
 }
 
 export function setDraftFrame(i: number | null): void {
-    session.draftFrame = i === null ? null : clampFrame(i);
+    session.draftFrame = i === null ? null : clampFrame(i, frameMax());
 }

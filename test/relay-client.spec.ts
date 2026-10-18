@@ -57,6 +57,59 @@ describe('parseStatus', () => {
     });
 });
 
+describe('parseStatus: latest', () => {
+    const S = 1768434600;
+    const entry = (snapshot: unknown, source: unknown = 'rainbow'): unknown => ({ snapshot, source });
+
+    it('reads the per-layer latest, the step and the window', () => {
+        const parsed = parseStatus({
+            ...GOOD,
+            latest: { precip: entry(S), 'precip-global': entry(S), clouds: entry(S - 600, 'computed'), radars: entry(S) },
+            stepSeconds: 600,
+            windowSeconds: 7200,
+        });
+        expect(parsed).toEqual({
+            ...GOOD,
+            latest: { precip: S, 'precip-global': S, clouds: S - 600, radars: S },
+            stepSeconds: 600,
+            windowSeconds: 7200,
+        });
+    });
+
+    it('keeps a partial latest and drops malformed entries without failing the status', () => {
+        const parsed = parseStatus({
+            ...GOOD,
+            latest: {
+                precip: entry(S),
+                clouds: entry('x'),
+                radars: entry(S + 5),
+                'precip-global': entry(1.5),
+                bogus: entry(S),
+            },
+        });
+        expect(parsed).toEqual({ ...GOOD, latest: { precip: S } });
+    });
+
+    it.each([
+        ['null', null],
+        ['a string', 'x'],
+        ['an array', [entry(S)]],
+        ['entries that are not objects', { precip: S, clouds: null, radars: [S] }],
+        ['an empty object', {}],
+    ])('ignores latest given as %s', (_name, latest) => {
+        expect(parseStatus({ ...GOOD, latest })).toEqual(GOOD);
+    });
+
+    it('ignores a bad stepSeconds or windowSeconds', () => {
+        expect(parseStatus({ ...GOOD, stepSeconds: '600', windowSeconds: -1 })).toEqual(GOOD);
+        expect(parseStatus({ ...GOOD, stepSeconds: 0.5 })).toEqual(GOOD);
+    });
+
+    it('still does not copy unknown fields', () => {
+        expect(parseStatus({ ...GOOD, latest: { precip: entry(S) }, key: 'abc', url: 'https://x' })).toEqual({ ...GOOD, latest: { precip: S } });
+    });
+});
+
 describe('isSupported', () => {
     it('supports apiVersion 1 only', () => {
         expect(isSupported({ ...GOOD, apiVersion: 1 })).toBe(true);

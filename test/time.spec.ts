@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
-    clock, applyServerTime, snapshotAt, clampFrame, frameToMinutes, minutesToFrame, validTimeS, dataAgeMin,
-    formatClock, frameLabel, debounce, rolloverJitterMs, SNAPSHOT_EXACT, APPROXIMATE_TOOLTIP, TIMELINE, FRAME_COUNT,
+    clock, applyServerTime, snapshotAt, clampFrame, frameToMinutes, frameTimeS, frameBounds, validLatest, anchorFrom,
+    lowerGuard, rainFrame, holdSnapshot, formatClock, formatHm, frameLabel, debounce, rolloverJitterMs,
+    TIMELINE, FRAME_COUNT, FRAME_MIN, FRAME_MAX,
 } from '../lib/time.ts';
 
 afterEach(() => {
@@ -64,39 +65,95 @@ describe('server clock', () => {
 });
 
 describe('frames', () => {
-    it('has 25 frames covering 0..240 minutes', () => {
-        expect(FRAME_COUNT).toBe(25);
-        expect(TIMELINE).toEqual({ pastFrames: 0, futureFrames: 24 });
+    it('has 37 frames covering -120..+240 minutes', () => {
+        expect(FRAME_MIN).toBe(-12);
+        expect(FRAME_MAX).toBe(24);
+        expect(FRAME_COUNT).toBe(37);
+        expect(TIMELINE).toEqual({ pastFrames: 12, futureFrames: 24 });
     });
-
+    it('frameBounds follows the Rain layer', () => {
+        expect(frameBounds(true)).toEqual({ min: -12, max: 24 });
+        expect(frameBounds(false)).toEqual({ min: -12, max: 0 });
+    });
     it.each([
-        [NaN, 0], [-5, 0], [-0.4, 0], [0, 0], [0.4, 0], [0.6, 1], [12, 12], [24, 24], [25, 24], [1000, 24], [Infinity, 24], [-Infinity, 0],
+        [NaN, 0], [-13, -12], [-12, -12], [-5, -5], [-0.4, 0], [0, 0], [0.4, 0], [0.6, 1], [12, 12], [24, 24], [25, 24], [1000, 24],
+        [Infinity, 24], [-Infinity, -12],
     ])('clampFrame(%s) = %s', (input, expected) => {
         expect(clampFrame(input)).toBe(expected);
     });
-
-    it('converts between frames and minutes', () => {
+    it('clampFrame honours a lower maximum (Rain off)', () => {
+        expect(clampFrame(6, 0)).toBe(0);
+        expect(clampFrame(-6, 0)).toBe(-6);
+        expect(clampFrame(40, 10)).toBe(10);
+        expect(clampFrame(40, 99)).toBe(24);
+    });
+    it('frameToMinutes is the forecast offset only', () => {
         expect(frameToMinutes(0)).toBe(0);
+        expect(frameToMinutes(-5)).toBe(0);
         expect(frameToMinutes(12)).toBe(120);
         expect(frameToMinutes(99)).toBe(240);
         expect(frameToMinutes(NaN)).toBe(0);
-        expect(minutesToFrame(240)).toBe(24);
-        expect(minutesToFrame(55)).toBe(6);
-        expect(minutesToFrame(-30)).toBe(0);
     });
-
-    it('validTimeS supports signed frames', () => {
-        expect(validTimeS(1000, 0)).toBe(1000);
-        expect(validTimeS(1000, 6)).toBe(4600);
-        expect(validTimeS(1000, -2)).toBe(-200);
-    });
-
-    it('dataAgeMin never goes negative', () => {
-        expect(dataAgeMin(1_000_000, (1_000_000 + 12 * 60) * 1000)).toBe(12);
-        expect(dataAgeMin(1_000_000, 900_000 * 1000)).toBe(0);
+    it('frameTimeS puts frames on a 10 minute axis', () => {
+        expect(frameTimeS(1000, 0)).toBe(1000);
+        expect(frameTimeS(1000, 6)).toBe(4600);
+        expect(frameTimeS(1000, -2)).toBe(-200);
     });
 });
-
+describe('timeline snapshots', () => {
+    // now = 23:25, precip/precip-global/radars latest 23:20, clouds latest 23:10 (plan D4)
+    const day = Date.parse('2026-01-14T00:00:00Z') / 1000;
+    const hm = (h: number, m: number): number => day + h * 3600 + m * 60;
+    const nowMs = hm(23, 25) * 1000;
+    const latest = { precip: hm(23, 20), 'precip-global': hm(23, 20), clouds: hm(23, 10), radars: hm(23, 20) };
+    const A = hm(23, 20);
+    it('anchorFrom takes the newest latest of the four layers', () => {
+        expect(anchorFrom(latest, hm(23, 10), nowMs)).toBe(A);
+        expect(anchorFrom({ clouds: hm(23, 10) }, hm(23, 20), nowMs)).toBe(hm(23, 10));
+        expect(anchorFrom({ clouds: hm(23, 10), radars: hm(23, 20) }, undefined, nowMs)).toBe(A);
+    });
+    it('anchorFrom ignores implausible entries and falls back to the status snapshot', () => {
+        const bad = { precip: hm(23, 20) + 5, clouds: day, radars: hm(23, 20) + 6000, 'precip-global': 1.5 };
+        expect(anchorFrom(bad, hm(23, 10), nowMs)).toBe(hm(23, 10));
+        expect(anchorFrom(undefined, hm(23, 10), nowMs)).toBe(hm(23, 10));
+        expect(anchorFrom({}, hm(23, 10), nowMs)).toBe(hm(23, 10));
+    });
+    it('anchorFrom falls back to the computed snapshot', () => {
+        expect(anchorFrom(undefined, undefined, nowMs)).toBe(snapshotAt(nowMs));
+        expect(anchorFrom({}, 1234, nowMs)).toBe(snapshotAt(nowMs));
+    });
+    it('validLatest keeps plausible entries only', () => {
+        expect(validLatest({ ...latest, clouds: 7 }, nowMs)).toEqual({ precip: A, 'precip-global': A, radars: A });
+        expect(validLatest(undefined, nowMs)).toEqual({});
+    });
+    it('lowerGuard never goes below the relay window', () => {
+        expect(lowerGuard(hm(21, 20), nowMs)).toBe(hm(21, 20));
+        expect(lowerGuard(hm(21, 0), nowMs)).toBe(hm(21, 10));
+        expect(lowerGuard(hm(23, 0), nowMs)).toBe(hm(23, 0));
+    });
+    it('rain: exact past, forecast from its own latest', () => {
+        expect(rainFrame(0, A, A, nowMs)).toEqual({ snapshot: A, forecast: 0 });
+        expect(rainFrame(-1, A, A, nowMs)).toEqual({ snapshot: hm(23, 10), forecast: 0 });
+        expect(rainFrame(-12, A, A, nowMs)).toEqual({ snapshot: hm(21, 20), forecast: 0 });
+        expect(rainFrame(3, A, A, nowMs)).toEqual({ snapshot: A, forecast: 30 });
+        expect(rainFrame(24, A, hm(23, 10), nowMs)).toEqual({ snapshot: hm(23, 10), forecast: 240 });
+        expect(rainFrame(3, A, undefined, nowMs)).toEqual({ snapshot: A, forecast: 30 });
+    });
+    it('clouds and radar hold their newest frame after Now', () => {
+        expect(holdSnapshot(3, A, nowMs)).toBe(A);
+        expect(holdSnapshot(24, A, nowMs)).toBe(A);
+        expect(holdSnapshot(0, A, nowMs)).toBe(A);
+        expect(holdSnapshot(-1, A, nowMs)).toBe(hm(23, 10));
+        expect(holdSnapshot(-12, A, nowMs)).toBe(hm(21, 20));
+    });
+    it('the lower guard repeats frame -11 for -12 while the window has slid but the anchor has not', () => {
+        // 23:40:20: the relay window is already 21:30..23:30 but the anchor is still 23:20
+        const later = (hm(23, 40) + 20) * 1000;
+        expect(holdSnapshot(-12, A, later)).toBe(hm(21, 30));
+        expect(holdSnapshot(-11, A, later)).toBe(hm(21, 30));
+        expect(rainFrame(-12, A, A, later).snapshot).toBe(hm(21, 30));
+    });
+});
 describe('formatClock', () => {
     it('formats NZDT (summer)', () => {
         expect(formatClock(Date.parse('2026-01-15T00:00:00Z') / 1000, 'Pacific/Auckland')).toBe('Thu 13:00 NZDT');
@@ -137,48 +194,45 @@ describe('formatClock', () => {
     });
 });
 
-describe('frameLabel', () => {
-    const snapshot = Date.parse('2026-01-15T00:00:00Z') / 1000;
-    const nowMs = (snapshot + 14 * 60) * 1000;
-
-    it('is approximate while SNAPSHOT_EXACT is false', () => {
-        expect(SNAPSHOT_EXACT).toBe(false);
+describe('formatHm', () => {
+    const t = Date.parse('2026-01-15T00:20:00Z') / 1000;
+    it('formats the time of day in each zone', () => {
+        expect(formatHm(t, 'Pacific/Auckland')).toBe('13:20');
+        expect(formatHm(t, 'UTC')).toBe('00:20');
+        expect(formatHm(t, 'local')).toMatch(/^\d{2}:\d{2}$/);
     });
-
-    it('labels frame 0 as Now with the data age', () => {
-        expect(frameLabel({ frame: 0, snapshot, nowMs, tz: 'Pacific/Auckland', precip: true })).toEqual({
-            primary: 'Now',
-            time: '~Thu 13:00 NZDT',
-            secondary: 'data 14 min old',
-            tooltip: APPROXIMATE_TOOLTIP,
-        });
-    });
-
-    it('labels a forecast frame with its clock time and offset', () => {
-        expect(frameLabel({ frame: 12, snapshot, nowMs, tz: 'Pacific/Auckland', precip: true })).toEqual({
-            primary: '~Thu 15:00 NZDT',
-            time: '',
-            secondary: '+120 min',
-            tooltip: APPROXIMATE_TOOLTIP,
-        });
-    });
-
-    it('uses the selected time zone', () => {
-        expect(frameLabel({ frame: 6, snapshot, nowMs, tz: 'UTC', precip: true }).primary).toBe('~Thu 01:00 UTC');
-    });
-
-    it('clamps a bad frame', () => {
-        expect(frameLabel({ frame: 99, snapshot, nowMs, tz: 'UTC', precip: true }).secondary).toBe('+240 min');
-        expect(frameLabel({ frame: NaN, snapshot, nowMs, tz: 'UTC', precip: true }).primary).toBe('Now');
-    });
-
-    it('says Current data when no rain layer is selected', () => {
-        expect(frameLabel({ frame: 5, snapshot, nowMs, tz: 'UTC', precip: false })).toEqual({
-            primary: 'Current data', time: '', secondary: '',
-        });
+    it('falls back to UTC for an invalid zone', () => {
+        expect(formatHm(t, 'Not/AZone' as 'UTC')).toBe('00:20');
     });
 });
-
+describe('frameLabel', () => {
+    const anchor = Date.parse('2026-01-15T00:00:00Z') / 1000;
+    it.each([
+        [0, 'Pacific/Auckland', 'Now · 13:00', 'Now · Thu 13:00 NZDT'],
+        [0, 'UTC', 'Now · 00:00', 'Now · Thu 00:00 UTC'],
+        [-4, 'Pacific/Auckland', '-40 min · 12:20', '-40 min · Thu 12:20 NZDT'],
+        [-4, 'UTC', '-40 min · 23:20', '-40 min · Wed 23:20 UTC'],
+        [-12, 'Pacific/Auckland', '-120 min · 11:00', '-120 min · Thu 11:00 NZDT'],
+        [3, 'Pacific/Auckland', '+30 min · 13:30', '+30 min · Thu 13:30 NZDT'],
+        [3, 'UTC', '+30 min · 00:30', '+30 min · Thu 00:30 UTC'],
+        [24, 'Pacific/Auckland', '+240 min · 17:00', '+240 min · Thu 17:00 NZDT'],
+    ] as const)('frame %s in %s', (frame, tz, text, title) => {
+        expect(frameLabel({ frame, anchor, tz })).toEqual({ text, title });
+    });
+    it('uses the device zone for local', () => {
+        const l = frameLabel({ frame: -2, anchor, tz: 'local' });
+        expect(l.text).toMatch(/^-20 min · \d{2}:\d{2}$/);
+        expect(l.title).toMatch(/^-20 min · [A-Z][a-z]{2} \d{2}:\d{2}/);
+    });
+    it('has no approximation marker', () => {
+        expect(frameLabel({ frame: 0, anchor, tz: 'UTC' }).text).not.toContain('~');
+    });
+    it('clamps a bad frame', () => {
+        expect(frameLabel({ frame: 99, anchor, tz: 'UTC' }).text).toBe('+240 min · 04:00');
+        expect(frameLabel({ frame: -99, anchor, tz: 'UTC' }).text).toBe('-120 min · 22:00');
+        expect(frameLabel({ frame: NaN, anchor, tz: 'UTC' }).text).toBe('Now · 00:00');
+    });
+});
 describe('debounce', () => {
     beforeEach(() => {
         vi.useFakeTimers();

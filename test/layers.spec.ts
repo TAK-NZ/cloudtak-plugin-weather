@@ -1,23 +1,34 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     SLOT_ORDER, layerId, sourceId, markerAnchor, planBeforeId, requestsFor, requestFor, computeDesired, LayerStack,
     type DesiredLayer, type RasterLayerSpec, type RasterSourceSpec,
 } from '../lib/layers.ts';
 import { buildTileTemplate } from '../lib/relay-client.ts';
 import { defaultSettings } from '../lib/state.ts';
+import { clock } from '../lib/time.ts';
 import { ATTRIBUTION, ID_PREFIX } from '../lib/constants.ts';
-import type { LayerSlot, WeatherSettings } from '../lib/types.ts';
+import type { LayerSlot, WeatherLayer, WeatherSettings } from '../lib/types.ts';
 import { FakeMap } from './fake-map.ts';
 
 const SNAP = 1768434600;
+// "Now" is 5 minutes after the anchor, so the relay window is SNAP - 7200 .. SNAP.
+beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime((SNAP + 900) * 1000);
+    clock.offsetMs = 0;
+});
+afterEach(() => {
+    vi.useRealTimers();
+});
 const ORIGIN = 'https://cot.test';
 
 interface Sess {
     frame: number;
     snapshot: number;
+    latest?: Partial<Record<WeatherLayer, number>>;
 }
 
-type Ev = 'clouds' | 'radars' | 'none' | 'regional' | 'global';
+type Ev = 'clouds' | 'radars' | 'regional' | 'global';
 
 function permutations<T>(items: T[]): T[][] {
     if (items.length <= 1) return [items.slice()];
@@ -29,18 +40,19 @@ function permutations<T>(items: T[]): T[][] {
     return out;
 }
 
+/** Every event flips one of the four independent switches. */
 function apply(s: WeatherSettings, ev: Ev): void {
     if (ev === 'clouds') s.clouds = !s.clouds;
     else if (ev === 'radars') s.radars = !s.radars;
-    else if (ev === 'none') s.precip = 'none';
-    else if (ev === 'regional') s.precip = 'precip';
-    else s.precip = 'precip-global';
+    else if (ev === 'regional') s.precipRegional = !s.precipRegional;
+    else s.precipGlobal = !s.precipGlobal;
 }
 
 function selected(s: WeatherSettings): Set<LayerSlot> {
     const out = new Set<LayerSlot>();
     if (s.clouds) out.add('clouds');
-    if (s.precip !== 'none') out.add('precip');
+    if (s.precipGlobal) out.add('precip-global');
+    if (s.precipRegional) out.add('precip');
     if (s.radars) out.add('radars');
     return out;
 }
@@ -78,7 +90,7 @@ function assertInvariants(map: FakeMap, s: WeatherSettings, sess: Sess, foreignE
     // I1: plugin layer set equals the selection
     expect(new Set(ours)).toEqual(new Set([...want].map(layerId)));
 
-    // I2: clouds < precip < radars
+    // I2: clouds < precip-global < precip < radars
     const ranks = ours.map((id) => SLOT_ORDER.findIndex((slot) => layerId(slot) === id));
     expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
 
@@ -113,7 +125,7 @@ function fresh(): { map: FakeMap; stack: LayerStack; s: WeatherSettings; sess: S
     return { map, stack: new LayerStack(map), s: defaultSettings(), sess: { frame: 0, snapshot: SNAP } };
 }
 
-const MEMBERS: Ev[] = ['clouds', 'regional', 'radars'];
+const MEMBERS: Ev[] = ['clouds', 'global', 'regional', 'radars'];
 
 describe('markerAnchor and planBeforeId', () => {
     it('prefers the first Map Features layer', () => {
@@ -136,34 +148,28 @@ describe('markerAnchor and planBeforeId', () => {
     });
 
     // Case I
-    it('planBeforeId returns the insertion table for all slot/present combinations', () => {
+    it('planBeforeId returns the nearest present higher slot, else the anchor, for all 4 x 16 combinations', () => {
         const A = 'anchor';
-        const set = (...s: LayerSlot[]): Set<LayerSlot> => new Set(s);
-        const c = layerId('clouds'), p = layerId('precip'), r = layerId('radars');
-
-        expect(planBeforeId('clouds', set(), A)).toBe(A);
-        expect(planBeforeId('clouds', set('precip'), A)).toBe(p);
-        expect(planBeforeId('clouds', set('radars'), A)).toBe(r);
-        expect(planBeforeId('clouds', set('precip', 'radars'), A)).toBe(p);
-
-        expect(planBeforeId('precip', set(), A)).toBe(A);
-        expect(planBeforeId('precip', set('clouds'), A)).toBe(A);
-        expect(planBeforeId('precip', set('radars'), A)).toBe(r);
-        expect(planBeforeId('precip', set('clouds', 'radars'), A)).toBe(r);
-
-        for (const present of [set(), set('clouds'), set('precip'), set('clouds', 'precip')]) {
-            expect(planBeforeId('radars', present, A)).toBe(A);
+        let checked = 0;
+        for (const slot of SLOT_ORDER) {
+            for (let mask = 0; mask < 16; mask++) {
+                const present = new Set(SLOT_ORDER.filter((_, i) => mask & (1 << i)));
+                const above = SLOT_ORDER.slice(SLOT_ORDER.indexOf(slot) + 1).find((x) => present.has(x));
+                expect(planBeforeId(slot, present, A)).toBe(above ? layerId(above) : A);
+                checked++;
+            }
         }
-
-        expect(planBeforeId('radars', set(), undefined)).toBeUndefined();
-        expect(c).toBe('taknz-wx-clouds');
+        expect(checked).toBe(64);
+        expect(planBeforeId('radars', new Set(), undefined)).toBeUndefined();
+        expect(planBeforeId('clouds', new Set<LayerSlot>(['precip-global']), A)).toBe('taknz-wx-precip-global');
+        expect(planBeforeId('precip-global', new Set<LayerSlot>(['precip', 'radars']), A)).toBe('taknz-wx-precip');
     });
 });
 
 describe('requestsFor and computeDesired', () => {
     it('returns one entry per slot, bottom to top', () => {
         const d = desired(defaultSettings(), { frame: 0, snapshot: SNAP });
-        expect(d.map((x) => x.slot)).toEqual(['clouds', 'precip', 'radars']);
+        expect(d.map((x) => x.slot)).toEqual(['clouds', 'precip-global', 'precip', 'radars']);
         expect(d.every((x) => !x.on)).toBe(true);
     });
 
@@ -171,9 +177,11 @@ describe('requestsFor and computeDesired', () => {
         const s = defaultSettings();
         s.clouds = true;
         s.radars = true;
-        s.precip = 'precip';
+        s.precipRegional = true;
+        s.precipGlobal = true;
         const r = requestsFor(s, { frame: 12, snapshot: SNAP });
         expect(r.precip?.query).toContainEqual(['forecast', '120']);
+        expect(r['precip-global']?.query).toContainEqual(['forecast', '120']);
         expect(r.clouds?.query.map(([k]) => k)).toEqual(['layer', 'snapshot']);
         expect(r.radars?.query.map(([k]) => k)).not.toContain('forecast');
     });
@@ -182,12 +190,14 @@ describe('requestsFor and computeDesired', () => {
         const s = defaultSettings();
         s.clouds = true;
         s.radars = true;
-        s.precip = 'precip-global';
+        s.precipGlobal = true;
+        s.precipRegional = true;
         s.tileSize = 256;
+        s.opacity['precip-global'] = 0.4;
         const d = desired(s, { frame: 0, snapshot: SNAP });
-        expect(d.map((x) => x.maxzoom)).toEqual([7, 9, 7]);
-        expect(d.map((x) => x.tileSize)).toEqual([256, 256, 256]);
-        expect(d.map((x) => x.opacity)).toEqual([0.5, 0.7, 0.7]);
+        expect(d.map((x) => x.maxzoom)).toEqual([7, 9, 9, 7]);
+        expect(d.map((x) => x.tileSize)).toEqual([256, 256, 256, 256]);
+        expect(d.map((x) => x.opacity)).toEqual([0.5, 0.4, 0.7, 0.7]);
     });
 
     it('treats a selected slot without a tile URL as off', () => {
@@ -200,33 +210,113 @@ describe('requestsFor and computeDesired', () => {
     it('requestFor throws a RangeError for an invalid snapshot, computeDesired does not', () => {
         const s = defaultSettings();
         s.clouds = true;
-        expect(() => requestFor('clouds', s, { frame: 0, snapshot: 1234 })).toThrow(RangeError);
-        expect(requestFor('radars', s, { frame: 0, snapshot: 1234 })).toBeNull();
-        expect(() => computeDesired(s, { frame: 0, snapshot: 1234 }, {})).not.toThrow();
+        expect(() => requestFor('clouds', s, { frame: 0, snapshot: NaN })).toThrow(RangeError);
+        expect(requestFor('radars', s, { frame: 0, snapshot: NaN })).toBeNull();
+        expect(() => computeDesired(s, { frame: 0, snapshot: NaN }, {})).not.toThrow();
     });
 });
-
+describe('timeline requests', () => {
+    const q = (r: ReturnType<typeof requestFor>): Record<string, string> => Object.fromEntries(r?.query ?? []);
+    const ON: LayerSlot[] = ['clouds', 'precip', 'radars'];
+    function all(): WeatherSettings {
+        const s = defaultSettings();
+        s.clouds = true;
+        s.radars = true;
+        s.precipRegional = true;
+        return s;
+    }
+    it('Now: every layer uses the anchor and Rain has no forecast', () => {
+        const r = requestsFor(all(), { frame: 0, snapshot: SNAP });
+        expect(q(r.precip)).toMatchObject({ layer: 'precip', snapshot: String(SNAP), forecast: '0' });
+        expect(q(r.clouds)).toEqual({ layer: 'clouds', snapshot: String(SNAP) });
+        expect(q(r.radars)).toMatchObject({ layer: 'radars', snapshot: String(SNAP) });
+    });
+    it('the past is exact for every layer, with no forecast', () => {
+        const r = requestsFor(all(), { frame: -4, snapshot: SNAP });
+        for (const slot of ON) expect(q(r[slot]).snapshot).toBe(String(SNAP - 2400));
+        expect(q(r.precip).forecast).toBe('0');
+        expect(r.clouds?.query.map(([k]) => k)).toEqual(['layer', 'snapshot']);
+    });
+    it('the forecast: Rain takes forecast minutes, clouds and radar hold the anchor', () => {
+        const r = requestsFor(all(), { frame: 3, snapshot: SNAP });
+        expect(q(r.precip)).toMatchObject({ snapshot: String(SNAP), forecast: '30' });
+        expect(q(r.clouds).snapshot).toBe(String(SNAP));
+        expect(q(r.radars).snapshot).toBe(String(SNAP));
+        expect(q(r.radars).forecast).toBeUndefined();
+    });
+    it('Rain forecasts from its own latest snapshot', () => {
+        const sess = { frame: 6, snapshot: SNAP, latest: { precip: SNAP - 600, clouds: SNAP - 1200, radars: SNAP } };
+        expect(q(requestFor('precip', all(), sess))).toMatchObject({ snapshot: String(SNAP - 600), forecast: '60' });
+        const global = all();
+        global.precipRegional = false;
+        global.precipGlobal = true;
+        expect(q(requestFor('precip-global', global, sess))).toMatchObject({ layer: 'precip-global', snapshot: String(SNAP), forecast: '60' });
+        expect(requestFor('precip', global, sess)).toBeNull();
+        const both = all();
+        both.precipGlobal = true;
+        const latest = { precip: SNAP - 600, 'precip-global': SNAP - 1200, clouds: SNAP, radars: SNAP };
+        expect(q(requestFor('precip', both, { ...sess, latest }))).toMatchObject({ layer: 'precip', snapshot: String(SNAP - 600), forecast: '60' });
+        expect(q(requestFor('precip-global', both, { ...sess, latest }))).toMatchObject({ layer: 'precip-global', snapshot: String(SNAP - 1200), forecast: '60' });
+    });
+    it('lagging clouds: the anchor is the newest layer, clouds are asked for the anchor and the relay clamps', () => {
+        // plan D4: precip/radars latest = A, clouds latest = A - 600
+        const sess = { frame: 0, snapshot: SNAP, latest: { precip: SNAP, 'precip-global': SNAP, radars: SNAP, clouds: SNAP - 600 } };
+        const r = requestsFor(all(), sess);
+        expect(q(r.clouds).snapshot).toBe(String(SNAP));
+        expect(q(r.radars).snapshot).toBe(String(SNAP));
+        expect(q(r.precip).snapshot).toBe(String(SNAP));
+        expect(q(requestFor('clouds', all(), { ...sess, frame: -1 })).snapshot).toBe(String(SNAP - 600));
+        expect(q(requestFor('clouds', all(), { ...sess, frame: 3 })).snapshot).toBe(String(SNAP));
+    });
+    it('the lower guard keeps -120 min inside the relay window while the anchor lags the clock', () => {
+        vi.setSystemTime((SNAP + 1200 + 20) * 1000);
+        const sess = { frame: -12, snapshot: SNAP };
+        for (const slot of ON) expect(q(requestFor(slot, all(), sess)).snapshot).toBe(String(SNAP - 7200 + 600));
+        expect(q(requestFor('precip', all(), { ...sess, frame: -11 })).snapshot).toBe(String(SNAP - 7200 + 600));
+    });
+    it('a relay without latest gives the plain anchor URLs at Now', () => {
+        const withLatest = requestsFor(all(), { frame: 0, snapshot: SNAP, latest: {} });
+        expect(withLatest).toEqual(requestsFor(all(), { frame: 0, snapshot: SNAP }));
+        expect(q(withLatest.precip).snapshot).toBe(String(SNAP));
+    });
+    it('clamps a stale frame to what the settings allow', () => {
+        const s = all();
+        s.precipRegional = false;
+        expect(requestFor('precip', s, { frame: 6, snapshot: SNAP })).toBeNull();
+        expect(q(requestFor('clouds', s, { frame: 6, snapshot: SNAP })).snapshot).toBe(String(SNAP));
+        expect(q(requestFor('clouds', all(), { frame: -99, snapshot: SNAP })).snapshot).toBe(String(SNAP - 7200));
+        expect(q(requestFor('precip', all(), { frame: 99, snapshot: SNAP })).forecast).toBe('240');
+    });
+    it('an explicit frame overrides the committed one', () => {
+        const r = requestFor('precip', all(), { frame: 0, snapshot: SNAP }, 5);
+        expect(q(r)).toMatchObject({ snapshot: String(SNAP), forecast: '50' });
+    });
+    it('never emits api, provider or size', () => {
+        const urls = ON.map((slot) => buildTileTemplate(ORIGIN, requestFor(slot, all(), { frame: -3, snapshot: SNAP }) as never, 't'));
+        for (const u of urls) expect(u).not.toMatch(/[?&](api|provider|size)=/);
+    });
+});
 describe('LayerStack: source and layer specs', () => {
     it('creates raster sources and layers with the documented options', () => {
         const { map, stack, s, sess } = fresh();
-        s.precip = 'precip-global';
+        s.precipGlobal = true;
         s.clouds = true;
         sync(stack, s, sess);
 
-        const src = map.getSource(sourceId('precip'))?.spec as RasterSourceSpec;
+        const src = map.getSource(sourceId('precip-global'))?.spec as RasterSourceSpec;
         expect(src).toMatchObject({ type: 'raster', tileSize: 512, minzoom: 0, maxzoom: 9, attribution: ATTRIBUTION });
         expect((map.getSource(sourceId('clouds'))?.spec as RasterSourceSpec).maxzoom).toBe(7);
 
-        const layer = map.getLayer(layerId('precip')) as unknown as RasterLayerSpec;
+        const layer = map.getLayer(layerId('precip-global')) as unknown as RasterLayerSpec;
         expect(layer.type).toBe('raster');
         expect(layer.paint).toEqual({ 'raster-opacity': 0.7, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
     });
 });
 
 describe('Case A: enable-order matrices', () => {
-    it('all 8 subsets in every permutation of enabling (16 sequences)', () => {
+    it('all 16 subsets of the four slots in every permutation of enabling (65 sequences)', () => {
         let sequences = 0;
-        for (let mask = 0; mask < 8; mask++) {
+        for (let mask = 0; mask < 16; mask++) {
             const members = MEMBERS.filter((_, i) => mask & (1 << i));
             for (const order of permutations(members)) {
                 const { map, stack, s, sess } = fresh();
@@ -236,51 +326,41 @@ describe('Case A: enable-order matrices', () => {
                     assertInvariants(map, s, sess);
                 }
                 expect(map.counters.moveLayer).toBe(0);
+                expect(map.counters.addLayer).toBe(members.length);
                 sequences++;
             }
         }
-        expect(sequences).toBe(16);
+        expect(sequences).toBe(65);
     });
-
-    it('27 sequences over the 12 precip variants', () => {
-        let sequences = 0;
-        let states = 0;
-        for (const precip of ['none', 'regional', 'global'] as const) {
-            for (const clouds of [false, true]) {
-                for (const radars of [false, true]) {
-                    states++;
-                    const members: Ev[] = [];
-                    if (clouds) members.push('clouds');
-                    if (precip !== 'none') members.push(precip);
-                    if (radars) members.push('radars');
-
-                    for (const order of permutations(members)) {
-                        const { map, stack, s, sess } = fresh();
-                        for (const ev of order) {
-                            apply(s, ev);
-                            sync(stack, s, sess);
-                            assertInvariants(map, s, sess);
-                        }
-                        expect(map.counters.moveLayer).toBe(0);
-                        expect(map.counters.addLayer).toBe(members.length);
-                        sequences++;
-                    }
-                }
+    it('the stacking matrix: for each of the 16 subsets the order and beforeId placement are exact', () => {
+        for (let mask = 0; mask < 16; mask++) {
+            const { map, stack, s, sess } = fresh();
+            const members = MEMBERS.filter((_, i) => mask & (1 << i));
+            for (const ev of members) apply(s, ev);
+            sync(stack, s, sess);
+            assertInvariants(map, s, sess);
+            const want = SLOT_ORDER.filter((slot) => selected(s).has(slot)).map(layerId);
+            const ids = map.layers.map((l) => l.id);
+            expect(ids.filter((id) => id.startsWith(ID_PREFIX))).toEqual(want);
+            // the weather layers are one contiguous block directly below the marker anchor
+            const anchor = anchorOf(map) as string;
+            if (want.length > 0) {
+                expect(ids.indexOf(want[0]) + want.length - 1).toBe(ids.indexOf(want[want.length - 1]));
+                expect(ids[ids.indexOf(anchor) - 1]).toBe(want[want.length - 1]);
             }
+            // every layer was inserted in place (just below the next higher present layer or the anchor)
+            expect(map.counters.moveLayer).toBe(0);
         }
-        expect(states).toBe(12);
-        expect(sequences).toBe(27);
     });
-
-    it('from all-three-on, disabling in every one of the 6 orders', () => {
-        for (const order of permutations<Ev>(['clouds', 'regional', 'radars'])) {
+    it('from all-four-on, disabling in every one of the 24 orders', () => {
+        for (const order of permutations<Ev>(['clouds', 'global', 'regional', 'radars'])) {
             const { map, stack, s, sess } = fresh();
             for (const ev of MEMBERS) apply(s, ev);
             sync(stack, s, sess);
             assertInvariants(map, s, sess);
 
             for (const ev of order) {
-                apply(s, ev === 'regional' ? 'none' : ev);
+                apply(s, ev);
                 sync(stack, s, sess);
                 assertInvariants(map, s, sess);
             }
@@ -289,9 +369,9 @@ describe('Case A: enable-order matrices', () => {
         }
     });
 
-    it('from all-three-on, every removal followed by re-adding in every order', () => {
+    it('from all-four-on, every removal followed by re-adding in every order', () => {
         let cases = 0;
-        for (let mask = 1; mask < 8; mask++) {
+        for (let mask = 1; mask < 16; mask++) {
             const removed = MEMBERS.filter((_, i) => mask & (1 << i));
             for (const readd of permutations(removed)) {
                 const { map, stack, s, sess } = fresh();
@@ -299,7 +379,7 @@ describe('Case A: enable-order matrices', () => {
                 sync(stack, s, sess);
 
                 for (const ev of removed) {
-                    apply(s, ev === 'regional' ? 'none' : ev);
+                    apply(s, ev);
                     sync(stack, s, sess);
                     assertInvariants(map, s, sess);
                 }
@@ -312,7 +392,7 @@ describe('Case A: enable-order matrices', () => {
                 cases++;
             }
         }
-        expect(cases).toBe(3 * 1 + 3 * 2 + 1 * 6);
+        expect(cases).toBe(4 * 1 + 6 * 2 + 4 * 6 + 1 * 24);
     });
 
     it('is idempotent: a second sync of the same state changes nothing', () => {
@@ -325,9 +405,9 @@ describe('Case A: enable-order matrices', () => {
     });
 });
 
-describe('Case B: exhaustive event sequences of length 1..5', () => {
-    it('keeps invariants I1-I6 and never calls moveLayer (3905 sequences)', () => {
-        const events: Ev[] = ['clouds', 'radars', 'none', 'regional', 'global'];
+describe('Case B: exhaustive event sequences of length 1..5 over the four switches', () => {
+    it('keeps invariants I1-I6 and never calls moveLayer (1364 sequences)', () => {
+        const events: Ev[] = ['clouds', 'radars', 'regional', 'global'];
         let total = 0;
 
         const run = (seq: Ev[]): void => {
@@ -358,39 +438,69 @@ describe('Case B: exhaustive event sequences of length 1..5', () => {
             level = level.flatMap((seq) => events.map((e) => [...seq, e]));
             level.forEach(run);
         }
-        expect(total).toBe(3905);
+        expect(total).toBe(1364);
     });
 });
 
-describe('Case C: rain variant switch', () => {
-    it('regional <-> global with clouds and radar on is one setTiles and no add/remove', () => {
+describe('Case C: the two Rain layers', () => {
+    it('both Rain layers on are two sources and two layers, Regional above Global', () => {
         const { map, stack, s, sess } = fresh();
         s.clouds = true;
         s.radars = true;
-        s.precip = 'precip';
-        sync(stack, s, sess);
-        const before = map.getStyle().layers.map((l) => l.id);
-        map.resetCounters();
-
-        s.precip = 'precip-global';
+        s.precipRegional = true;
+        s.precipGlobal = true;
         sync(stack, s, sess);
         assertInvariants(map, s, sess);
-        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 0, removeSource: 0, moveLayer: 0, setTiles: 1, setPaintProperty: 0 });
-        expect(map.getStyle().layers.map((l) => l.id)).toEqual(before);
-        expect(map.getSource(sourceId('precip'))?.tiles[0]).toContain('layer=precip-global');
-
-        s.precip = 'precip';
-        sync(stack, s, sess);
-        expect(map.counters.setTiles).toBe(2);
-        expect(map.counters.addLayer).toBe(0);
-        expect(map.counters.removeLayer).toBe(0);
+        const ours = map.layers.map((l) => l.id).filter((id) => id.startsWith(ID_PREFIX));
+        expect(ours).toEqual(['taknz-wx-clouds', 'taknz-wx-precip-global', 'taknz-wx-precip', 'taknz-wx-radars']);
+        expect(map.getSource(sourceId('precip'))?.tiles[0]).toContain('layer=precip&');
+        expect(map.getSource(sourceId('precip-global'))?.tiles[0]).toContain('layer=precip-global&');
+        expect(map.getSource(sourceId('precip'))?.tiles[0]).not.toBe(map.getSource(sourceId('precip-global'))?.tiles[0]);
+        expect(map.counters.addSource).toBe(4);
+        expect(map.counters.moveLayer).toBe(0);
     });
-
+    it('switching one Rain layer does not touch the other', () => {
+        const { map, stack, s, sess } = fresh();
+        s.clouds = true;
+        s.radars = true;
+        s.precipRegional = true;
+        s.precipGlobal = true;
+        sync(stack, s, sess);
+        const regional = map.getSource(sourceId('precip'))?.tiles[0];
+        map.resetCounters();
+        s.precipGlobal = false;
+        sync(stack, s, sess);
+        assertInvariants(map, s, sess);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 1, removeSource: 1, moveLayer: 0, setTiles: 0, setPaintProperty: 0 });
+        expect(map.getSource(sourceId('precip'))?.tiles[0]).toBe(regional);
+        map.resetCounters();
+        s.precipGlobal = true;
+        s.precipRegional = false;
+        sync(stack, s, sess);
+        assertInvariants(map, s, sess);
+        expect(map.counters).toEqual({ addSource: 1, addLayer: 1, removeLayer: 1, removeSource: 1, moveLayer: 0, setTiles: 0, setPaintProperty: 0 });
+    });
+    it('the palette is shared and the opacity is per Rain layer', () => {
+        const { map, stack, s, sess } = fresh();
+        s.precipRegional = true;
+        s.precipGlobal = true;
+        s.palette.precip = '7';
+        s.opacity['precip-global'] = 0.3;
+        sync(stack, s, sess);
+        expect(map.getSource(sourceId('precip'))?.tiles[0]).toContain('color=7');
+        expect(map.getSource(sourceId('precip-global'))?.tiles[0]).toContain('color=7');
+        expect((map.getLayer(layerId('precip')) as unknown as RasterLayerSpec).paint['raster-opacity']).toBe(0.7);
+        expect((map.getLayer(layerId('precip-global')) as unknown as RasterLayerSpec).paint['raster-opacity']).toBe(0.3);
+        map.resetCounters();
+        s.opacity['precip-global'] = 0.5;
+        sync(stack, s, sess);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 0, removeSource: 0, moveLayer: 0, setTiles: 0, setPaintProperty: 1 });
+    });
     it('a forecast slider commit is exactly one setTiles, on the rain source', () => {
         const { map, stack, s, sess } = fresh();
         s.clouds = true;
         s.radars = true;
-        s.precip = 'precip';
+        s.precipRegional = true;
         sync(stack, s, sess);
         const cloudsTiles = map.getSource(sourceId('clouds'))?.tiles[0];
         const radarsTiles = map.getSource(sourceId('radars'))?.tiles[0];
@@ -415,7 +525,7 @@ describe('Case C: rain variant switch', () => {
         sess.snapshot = SNAP + 600;
         sync(stack, s, sess);
         assertInvariants(map, s, sess);
-        expect(map.counters.setTiles).toBe(3);
+        expect(map.counters.setTiles).toBe(4);
     });
 });
 
@@ -517,7 +627,7 @@ describe('Case E: no Map Features layers', () => {
             sync(stack, s, sess);
         }
         const ids = map.layers.map((l) => l.id);
-        expect(ids.slice(-4)).toEqual([layerId('clouds'), layerId('precip'), layerId('radars'), 'labels']);
+        expect(ids.slice(-5)).toEqual([layerId('clouds'), layerId('precip-global'), layerId('precip'), layerId('radars'), 'labels']);
         expect(map.counters.moveLayer).toBe(0);
     });
 
@@ -554,8 +664,8 @@ describe('Case F: re-creation keeps the position', () => {
         sync(stack, s, sess);
         assertInvariants(map, s, sess);
         expect(map.layers.map((l) => l.id)).toEqual(before);
-        expect(map.counters.addLayer).toBe(3);
-        expect(map.counters.removeLayer).toBe(3);
+        expect(map.counters.addLayer).toBe(4);
+        expect(map.counters.removeLayer).toBe(4);
         expect(map.counters.moveLayer).toBe(0);
         expect((map.getSource(sourceId('precip'))?.spec as RasterSourceSpec).tileSize).toBe(256);
     });
@@ -616,7 +726,7 @@ describe('Case G: map re-initialisation', () => {
         const stack = new LayerStack(map);
         sync(stack, first.s, first.sess);
         assertInvariants(map, first.s, first.sess);
-        expect(map.counters.addLayer).toBe(3);
+        expect(map.counters.addLayer).toBe(4);
     });
 });
 

@@ -3,6 +3,7 @@ import type { PluginAPI } from '@tak-ps/cloudtak';
 import type { Host } from '../lib/types.ts';
 import type { ControlMapLike, IControlLike } from '../lib/control.ts';
 import { FakeMap } from './fake-map.ts';
+import { toggleLayer } from '../lib/state.ts';
 
 export { FakeMap };
 
@@ -69,6 +70,7 @@ export class EventedFakeMap extends FakeMap {
     }
 }
 
+/** A status as an older relay sends it (no `latest`); pass `latest` in `over` for a newer one. */
 export function statusBody(over: Record<string, unknown> = {}): Record<string, unknown> {
     const now = Math.floor(Date.now() / 1000);
     return {
@@ -81,6 +83,17 @@ export function statusBody(over: Record<string, unknown> = {}): Record<string, u
     };
 }
 
+/** The relay's per-layer `latest` object (newest snapshot per layer), as sent by /status. */
+export function latestBody(
+    snapshot: number,
+    over: Partial<Record<'precip' | 'precip-global' | 'clouds' | 'radars', number>> = {}
+): Record<string, { snapshot: number; source: 'rainbow' }> {
+    const out: Record<string, { snapshot: number; source: 'rainbow' }> = {};
+    for (const layer of ['precip', 'precip-global', 'clouds', 'radars'] as const) {
+        out[layer] = { snapshot: over[layer] ?? snapshot, source: 'rainbow' };
+    }
+    return out;
+}
 export function jsonResponse(status: number, body?: unknown): Response {
     return {
         status,
@@ -165,4 +178,10 @@ export function makeFakeApi(initial: EventedFakeMap | Error = new EventedFakeMap
             current = map;
         },
     };
+}
+
+/** Switch the two Rain layers: Regional only, Global only, both or neither. */
+export function setRain(mode: 'none' | 'precip' | 'precip-global' | 'both'): void {
+    toggleLayer('precipRegional', mode === 'precip' || mode === 'both');
+    toggleLayer('precipGlobal', mode === 'precip-global' || mode === 'both');
 }

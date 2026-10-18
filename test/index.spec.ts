@@ -13,9 +13,10 @@ const hostMock = vi.hoisted(() => ({
 vi.mock('../lib/host.ts', () => hostMock);
 
 import WeatherPlugin from '../index.ts';
-import { bindStorage, session, setFrame, toggleLayer, setPrecip } from '../lib/state.ts';
+import { bindStorage, session, setFrame, settings, toggleLayer } from '../lib/state.ts';
+import { snapshotAt } from '../lib/time.ts';
 import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
-import { EventedFakeMap, deferred, jsonResponse, makeFakeApi, statusBody } from './helpers.ts';
+import { EventedFakeMap, deferred, jsonResponse, latestBody, makeFakeApi, setRain, statusBody } from './helpers.ts';
 
 const host = hostMock.host;
 const STATUS_URL = 'https://cot.test/api/weather/status';
@@ -49,6 +50,7 @@ beforeEach(() => {
     bindStorage(null);
     setFrame(0);
     session.status = null;
+    session.latest = {};
     session.panelOpen = false;
     session.health = { kind: 'ok' };
     vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -105,7 +107,7 @@ describe('lifecycle', () => {
     ])('registers nothing and requests no tiles on %s', async (_name, setup) => {
         setup();
         toggleLayer('clouds', true);
-        setPrecip('precip');
+        setRain('precip');
         const map = new EventedFakeMap();
         const { instance, calls } = await install(map);
 
@@ -376,7 +378,7 @@ describe('weather control and bottom bar', () => {
 
     it('refreshStatus finding the relay disabled removes the control', async () => {
         const map = new EventedFakeMap();
-        setPrecip('precip');
+        setRain('precip');
         await running(map);
         await vi.waitFor(() => expect(map.counters.addLayer).toBe(1));
 
@@ -404,7 +406,7 @@ describe('weather control and bottom bar', () => {
         toggleLayer('clouds', false);
         expect(dot()?.style.display).toBe('none');
 
-        setPrecip('precip');
+        setRain('precip');
         expect(dot()?.style.display).toBe('');
     });
 
@@ -437,7 +439,7 @@ describe('layers', () => {
 
     it('restores the selection on a new map after disable and enable', async () => {
         toggleLayer('clouds', true);
-        setPrecip('precip-global');
+        setRain('precip-global');
         const first = new EventedFakeMap();
         const fake = await install(first);
         await fake.instance.enable();
@@ -458,12 +460,12 @@ describe('layers', () => {
             'menu.add:weather',
         ]);
         await vi.waitFor(() => expect(second.layers.filter((l) => l.id.startsWith('taknz-wx-')).map((l) => l.id))
-            .toEqual(['taknz-wx-clouds', 'taknz-wx-precip']));
+            .toEqual(['taknz-wx-clouds', 'taknz-wx-precip-global']));
         expect(tileUrls(second).some((u) => u.includes('layer=precip-global'))).toBe(true);
     });
 
     it('re-reads the token on every setTiles', async () => {
-        setPrecip('precip');
+        setRain('precip');
         const map = new EventedFakeMap();
         const { instance } = await install(map);
         await instance.enable();
@@ -484,7 +486,7 @@ describe('layers', () => {
     it('a slider commit makes exactly one setTiles, on the rain source only', async () => {
         toggleLayer('clouds', true);
         toggleLayer('radars', true);
-        setPrecip('precip');
+        setRain('precip');
         const map = new EventedFakeMap();
         const { instance } = await install(map);
         await instance.enable();
@@ -507,7 +509,7 @@ describe('layers', () => {
     });
 
     it('holds back tile URL changes while the relay is unhealthy, but still removes layers', async () => {
-        setPrecip('precip');
+        setRain('precip');
         toggleLayer('clouds', true);
         const map = new EventedFakeMap();
         const { instance } = await install(map);
@@ -531,7 +533,7 @@ describe('layers', () => {
     });
 
     it('turns itself off when a 403 and a status refetch say the relay is disabled', async () => {
-        setPrecip('precip');
+        setRain('precip');
         const map = new EventedFakeMap();
         const { instance, calls } = await install(map);
         await instance.enable();
@@ -606,10 +608,10 @@ describe('tile URL failures', () => {
         await running(map);
         const before = map.sources.get('taknz-wx-radars-src')?.tiles[0];
 
-        // A snapshot that is not a multiple of 600 makes tileRequest throw a RangeError
-        session.snapshot = 1234;
+        // A snapshot that is not a number makes tileRequest throw a RangeError
+        session.snapshot = Number.NaN;
         await vi.waitFor(() => expect(warnings()).toHaveLength(1));
-        expect(warnings()[0]).toMatch(/Invalid weather request \(RangeError: Invalid snapshot: 1234\)/);
+        expect(warnings()[0]).toMatch(/Invalid weather request \(RangeError: Invalid snapshot: NaN\)/);
         expect(warnings()[0]).not.toMatch(/session token|tok-1/);
         expect(wxLayers(map)).toEqual(['taknz-wx-clouds', 'taknz-wx-radars']);
 
@@ -630,5 +632,253 @@ describe('tile URL failures', () => {
         toggleLayer('clouds', true);
         await vi.waitFor(() => expect(wxLayers(map)).toEqual(['taknz-wx-clouds', 'taknz-wx-radars']));
         expect(map.sources.get('taknz-wx-clouds-src')?.tiles[0]).toContain('token=tok-9');
+    });
+});
+
+describe('timeline', () => {
+    const T0 = Date.parse('2026-01-15T00:25:00Z');
+    const snapParam = (url: string | undefined): string | null => new URL(url ?? 'https://x/?').searchParams.get('snapshot');
+    const forecastParam = (url: string | undefined): string | null => new URL(url ?? 'https://x/?').searchParams.get('forecast');
+    const src = (map: EventedFakeMap, slot: string): string | undefined => map.sources.get(`taknz-wx-${slot}-src`)?.tiles[0];
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    /** A status that follows the (fake) clock; `latestOf` shapes the per-layer latest, undefined = old relay. */
+    function statusFollowingClock(latestOf?: (computed: number) => Record<string, unknown>): void {
+        host.fetch.mockImplementation(async () => {
+            const body = statusBody({ serverTime: Math.floor(Date.now() / 1000), snapshot: snapshotAt(Date.now()) });
+            if (latestOf) body.latest = latestOf(snapshotAt(Date.now()));
+            return jsonResponse(200, body);
+        });
+    }
+
+    async function start(map = new EventedFakeMap()): Promise<EventedFakeMap> {
+        const { instance } = await install(map);
+        await instance.enable();
+        await plugin?.pending;
+        await vi.advanceTimersByTimeAsync(0);
+        return map;
+    }
+
+    it('anchors the timeline on the newest layer and holds a lagging clouds layer', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        const A = snapshotAt(T0);
+        statusFollowingClock((c) => latestBody(c, { clouds: c - 600 }));
+        toggleLayer('clouds', true);
+        toggleLayer('radars', true);
+        setRain('precip');
+        const map = await start();
+
+        expect(session.snapshot).toBe(A);
+        expect(session.latest).toEqual({ precip: A, 'precip-global': A, clouds: A - 600, radars: A });
+        expect(snapParam(src(map, 'clouds'))).toBe(String(A));
+        expect(snapParam(src(map, 'radars'))).toBe(String(A));
+        expect(snapParam(src(map, 'precip'))).toBe(String(A));
+
+        setFrame(-1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(A - 600));
+        expect(snapParam(src(map, 'precip'))).toBe(String(A - 600));
+        expect(forecastParam(src(map, 'precip'))).toBe('0');
+
+        setFrame(3);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(A));
+        expect(snapParam(src(map, 'precip'))).toBe(String(A));
+        expect(forecastParam(src(map, 'precip'))).toBe('30');
+    });
+
+    it('the anchor is the newest latest, not the status snapshot', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        const A = snapshotAt(T0);
+        statusFollowingClock((c) => latestBody(c - 600));
+        toggleLayer('radars', true);
+        const map = await start();
+        expect(session.snapshot).toBe(A - 600);
+        expect(snapParam(src(map, 'radars'))).toBe(String(A - 600));
+    });
+
+    it('an old relay without latest keeps working with the status snapshot', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        statusFollowingClock();
+        toggleLayer('clouds', true);
+        setRain('precip');
+        const map = await start();
+        expect(session.latest).toEqual({});
+        expect(session.snapshot).toBe(snapshotAt(T0));
+        expect(snapParam(src(map, 'clouds'))).toBe(String(snapshotAt(T0)));
+        setFrame(6);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(snapParam(src(map, 'precip'))).toBe(String(snapshotAt(T0)));
+        expect(forecastParam(src(map, 'precip'))).toBe('60');
+    });
+
+    it('a new 10-minute boundary fetches the status again and moves the anchor', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        statusFollowingClock((c) => latestBody(c));
+        toggleLayer('clouds', true);
+        const map = await start();
+        const first = snapshotAt(T0);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(first));
+        const calls = host.fetch.mock.calls.length;
+
+        vi.setSystemTime(T0 + 6 * 60_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(100);
+
+        expect(host.fetch.mock.calls.length).toBeGreaterThan(calls);
+        expect(session.snapshot).toBe(first + 600);
+        expect(session.latest.clouds).toBe(first + 600);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(first + 600));
+    });
+
+    it('falls back to the computed snapshot when the status cannot be fetched at the boundary', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        statusFollowingClock((c) => latestBody(c, { clouds: c - 600 }));
+        toggleLayer('clouds', true);
+        const map = await start();
+        const first = snapshotAt(T0);
+        expect(session.latest.clouds).toBe(first - 600);
+
+        host.fetch.mockImplementation(async () => jsonResponse(500));
+        vi.setSystemTime(T0 + 6 * 60_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(100);
+
+        expect(session.latest).toEqual({});
+        expect(session.snapshot).toBe(first + 600);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(first + 600));
+    });
+
+    it('the panel always opens and closes on Now', async () => {
+        setRain('precip');
+        await (async () => {
+            const { instance } = await install();
+            await instance.enable();
+            await plugin?.pending;
+        })();
+        setFrame(-3);
+        session.panelOpen = true;
+        expect(session.frame).toBe(0);
+        setFrame(6);
+        session.panelOpen = false;
+        expect(session.frame).toBe(0);
+        setFrame(-12);
+        session.panelOpen = true;
+        expect(session.frame).toBe(0);
+    });
+
+    it('switching Rain off while on a forecast frame returns to Now, a past frame stays', async () => {
+        setRain('precip');
+        toggleLayer('clouds', true);
+        const { instance } = await install();
+        await instance.enable();
+        await plugin?.pending;
+        setFrame(6);
+        settings.precipRegional = false;
+        expect(session.frame).toBe(0);
+        settings.precipRegional = true;
+        setFrame(-4);
+        settings.precipRegional = false;
+        expect(session.frame).toBe(-4);
+    });
+    it('the forecast frame survives while either Rain layer is on and ends with the last one', async () => {
+        setRain('both');
+        const { instance } = await install();
+        await instance.enable();
+        await plugin?.pending;
+        setFrame(6);
+        settings.precipRegional = false;
+        expect(session.frame).toBe(6);
+        settings.precipRegional = true;
+        settings.precipGlobal = false;
+        expect(session.frame).toBe(6);
+        settings.precipRegional = false;
+        expect(session.frame).toBe(0);
+    });
+    it('both Rain layers on are two sources with their own layer parameter', async () => {
+        setRain('both');
+        const map = new EventedFakeMap();
+        const { instance } = await install(map);
+        await instance.enable();
+        await plugin?.pending;
+        await vi.waitFor(() => expect(map.layers.filter((l) => l.id.startsWith('taknz-wx-'))).toHaveLength(2));
+        expect(map.layers.filter((l) => l.id.startsWith('taknz-wx-')).map((l) => l.id)).toEqual(['taknz-wx-precip-global', 'taknz-wx-precip']);
+        expect(new URL(map.sources.get('taknz-wx-precip-src')?.tiles[0] ?? 'x:').searchParams.get('layer')).toBe('precip');
+        expect(new URL(map.sources.get('taknz-wx-precip-global-src')?.tiles[0] ?? 'x:').searchParams.get('layer')).toBe('precip-global');
+    });
+
+    describe('Escape', () => {
+        const escape = (init: KeyboardEventInit = {}): void => {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init }));
+        };
+        async function open() {
+            const fake = await install();
+            await fake.instance.enable();
+            await plugin?.pending;
+            controlButton()?.click();
+            expect(session.panelOpen).toBe(true);
+            return fake;
+        }
+
+        it('closes the panel at document level and returns focus to the weather button', async () => {
+            await open();
+            const outside = document.createElement('input');
+            document.body.append(outside);
+            outside.focus();
+            escape();
+            expect(session.panelOpen).toBe(false);
+            await vi.waitFor(() => expect(document.activeElement).toBe(controlButton()));
+        });
+
+        it('ignores other keys and events that were already handled', async () => {
+            await open();
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            expect(session.panelOpen).toBe(true);
+            const handled = (e: Event): void => e.preventDefault();
+            window.addEventListener('keydown', handled, true);
+            escape();
+            window.removeEventListener('keydown', handled, true);
+            expect(session.panelOpen).toBe(true);
+        });
+
+        it('is only listening while the panel is open', async () => {
+            const add = vi.spyOn(document, 'addEventListener');
+            const remove = vi.spyOn(document, 'removeEventListener');
+            const keydowns = (spy: typeof add): number => spy.mock.calls.filter((c) => c[0] === 'keydown').length;
+            const fake = await install();
+            await fake.instance.enable();
+            await plugin?.pending;
+            expect(keydowns(add)).toBe(0);
+
+            session.panelOpen = true;
+            expect(keydowns(add)).toBe(1);
+            session.panelOpen = false;
+            expect(keydowns(remove)).toBe(1);
+            session.panelOpen = true;
+            expect(keydowns(add)).toBe(2);
+            session.panelOpen = true;
+            expect(keydowns(add)).toBe(2);
+        });
+
+        it('is gone after disable()', async () => {
+            const remove = vi.spyOn(document, 'removeEventListener');
+            const { instance } = await open();
+            await instance.disable();
+            expect(remove.mock.calls.filter((c) => c[0] === 'keydown')).toHaveLength(1);
+            session.panelOpen = true;
+            escape();
+            expect(session.panelOpen).toBe(true);
+            session.panelOpen = false;
+        });
     });
 });

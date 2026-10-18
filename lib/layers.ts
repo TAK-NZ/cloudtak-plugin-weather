@@ -1,16 +1,17 @@
 import type { LayerSlot, TileRequest, WeatherSettings } from './types.ts';
 import type { Session } from './state.ts';
+import { rainOn } from './state.ts';
 import { ATTRIBUTION, ID_PREFIX } from './constants.ts';
 import { tileRequest } from './tile-url.ts';
-import { frameToMinutes } from './time.ts';
+import { clampFrame, clock, frameBounds, holdSnapshot, rainFrame } from './time.ts';
 
 /** Bottom to top. */
-export const SLOT_ORDER: LayerSlot[] = ['clouds', 'precip', 'radars'];
+export const SLOT_ORDER: LayerSlot[] = ['clouds', 'precip-global', 'precip', 'radars'];
 
 export const layerId = (s: LayerSlot): string => `${ID_PREFIX}${s}`;
 export const sourceId = (s: LayerSlot): string => `${ID_PREFIX}${s}-src`;
 
-const MAX_ZOOM: Record<LayerSlot, number> = { clouds: 7, precip: 9, radars: 7 };
+const MAX_ZOOM: Record<LayerSlot, number> = { clouds: 7, 'precip-global': 9, precip: 9, radars: 7 };
 
 export interface StyleLayerLike {
     id: string;
@@ -87,30 +88,43 @@ export function planBeforeId(slot: LayerSlot, present: ReadonlySet<LayerSlot>, a
 /** Whether the user switched the slot on. Never throws. */
 export function isSelected(slot: LayerSlot, settings: WeatherSettings): boolean {
     if (slot === 'clouds') return settings.clouds;
-    if (slot === 'precip') return settings.precip !== 'none';
+    if (slot === 'precip-global') return settings.precipGlobal;
+    if (slot === 'precip') return settings.precipRegional;
     return settings.radars;
 }
 
+type TimelineSession = Pick<Session, 'frame' | 'snapshot'> & Partial<Pick<Session, 'latest'>>;
+
 /**
- * The relay request for one slot, or null when it is switched off.
+ * The relay request for one slot, or null when it is switched off. `frame` defaults to
+ * the committed frame and is clamped to what the settings allow (no Rain: no forecast).
  * Throws a RangeError when the settings do not make a valid request.
  */
-export function requestFor(slot: LayerSlot, settings: WeatherSettings, session: Pick<Session, 'frame' | 'snapshot'>): TileRequest | null {
-    const snapshot = session.snapshot;
+export function requestFor(
+    slot: LayerSlot,
+    settings: WeatherSettings,
+    session: TimelineSession,
+    frame: number = session.frame
+): TileRequest | null {
+    const anchor = session.snapshot;
+    const nowMs = clock.now();
+    const k = clampFrame(frame, frameBounds(rainOn(settings)).max);
 
-    if (slot === 'clouds') return settings.clouds ? tileRequest('clouds', { snapshot }) : null;
-    if (slot === 'precip') {
-        return settings.precip === 'none' ? null : tileRequest(settings.precip, {
+    if (slot === 'clouds') return settings.clouds ? tileRequest('clouds', { snapshot: holdSnapshot(k, anchor, nowMs) }) : null;
+    if (slot === 'precip' || slot === 'precip-global') {
+        if (!isSelected(slot, settings)) return null;
+        const rain = rainFrame(k, anchor, session.latest?.[slot], nowMs);
+        return tileRequest(slot, {
             color: settings.palette.precip,
-            forecast: frameToMinutes(session.frame),
-            snapshot,
+            forecast: rain.forecast,
+            snapshot: rain.snapshot,
             coverage: settings.coverage,
         });
     }
     if (!settings.radars) return null;
     return tileRequest('radars', {
         color: settings.palette.radars,
-        snapshot,
+        snapshot: holdSnapshot(k, anchor, nowMs),
         coverage: settings.coverage,
         usePrecipType: settings.radarsPrecipType,
     });
@@ -118,23 +132,23 @@ export function requestFor(slot: LayerSlot, settings: WeatherSettings, session: 
 
 /**
  * The relay request for each slot that is switched on (null = off).
- * Only the rain request carries the forecast frame; clouds and radar show current data.
+ * Only Rain carries the forecast; clouds and radar hold their newest frame after Now.
  */
-export function requestsFor(settings: WeatherSettings, session: Pick<Session, 'frame' | 'snapshot'>): Record<LayerSlot, TileRequest | null> {
+export function requestsFor(settings: WeatherSettings, session: TimelineSession, frame: number = session.frame): Record<LayerSlot, TileRequest | null> {
     return {
-        clouds: requestFor('clouds', settings, session),
-        precip: requestFor('precip', settings, session),
-        radars: requestFor('radars', settings, session),
+        clouds: requestFor('clouds', settings, session, frame),
+        'precip-global': requestFor('precip-global', settings, session, frame),
+        precip: requestFor('precip', settings, session, frame),
+        radars: requestFor('radars', settings, session, frame),
     };
 }
 
 /**
- * One entry per slot. A slot is on when it is selected and has a tile URL;
- * regional and global rain share the single precip slot.
+ * One entry per slot. A slot is on when it is selected and has a tile URL.
  */
 export function computeDesired(
     settings: WeatherSettings,
-    session: Pick<Session, 'frame' | 'snapshot'>,
+    session: TimelineSession,
     tileUrls: Partial<Record<LayerSlot, string>>
 ): DesiredLayer[] {
     return SLOT_ORDER.map((slot) => {

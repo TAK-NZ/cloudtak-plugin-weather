@@ -1,15 +1,21 @@
-export type LayerSlot = 'clouds' | 'precip' | 'radars';
-export type PrecipMode = 'none' | 'precip' | 'precip-global';
-export type WeatherLayer = 'precip' | 'precip-global' | 'clouds' | 'radars';
+/** One map layer per slot. Regional Rain is `precip`, Global Rain is `precip-global`. */
+export type LayerSlot = 'clouds' | 'precip-global' | 'precip' | 'radars';
+export type WeatherLayer = LayerSlot;
+/** The independent on/off switches of the settings. */
+export type ToggleKey = 'clouds' | 'precipGlobal' | 'precipRegional' | 'radars';
 export type PaletteCode = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'dbz_u8';
 export type TimeZoneSetting = 'Pacific/Auckland' | 'UTC' | 'local';
 
 export interface WeatherSettings {
-    version: 2;
-    precip: PrecipMode;
+    version: 3;
     clouds: boolean;
+    /** Rain, Regional. */
+    precipRegional: boolean;
+    /** Rain, Global. */
+    precipGlobal: boolean;
     radars: boolean;
     opacity: Record<LayerSlot, number>;
+    /** `precip` is shared by both Rain layers. */
     palette: { precip: PaletteCode; radars: PaletteCode };
     coverage: boolean;
     radarsPrecipType: boolean;
@@ -23,6 +29,10 @@ export interface RelayStatus {
     serverTime: number;
     snapshot: number;
     layers: string[];
+    /** Newest snapshot per layer (relays that support the timeline only). */
+    latest?: Partial<Record<WeatherLayer, number>>;
+    stepSeconds?: number;
+    windowSeconds?: number;
 }
 
 export type HealthState =

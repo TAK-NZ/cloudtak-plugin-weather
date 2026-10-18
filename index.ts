@@ -1,12 +1,12 @@
 import type { App } from 'vue';
-import { h, watch } from 'vue';
+import { h, nextTick, watch } from 'vue';
 import type { PluginAPI, PluginInstance } from '@tak-ps/cloudtak';
 import type { LayerSlot, RelayStatus } from './lib/types.ts';
 import MenuTemplate from './lib/MenuTemplate.vue';
 import WeatherBar from './lib/WeatherBar.vue';
 import WeatherSettings from './lib/WeatherSettings.vue';
 import { IconWeather } from './lib/icon.ts';
-import { WeatherControl } from './lib/control.ts';
+import { WeatherControl, focusWeatherControl } from './lib/control.ts';
 import type { ControlHost } from './lib/control.ts';
 import { host } from './lib/host.ts';
 import { BOTTOM_KEY, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
@@ -16,8 +16,8 @@ import { LayerStack, SLOT_ORDER, computeDesired, isSelected, requestFor } from '
 import type { MapLike } from './lib/layers.ts';
 import { HealthMonitor, healthMessage } from './lib/health.ts';
 import type { MapErrorLike } from './lib/health.ts';
-import { session, setFrame, settings } from './lib/state.ts';
-import { applyServerTime, clock, rolloverJitterMs, snapshotAt } from './lib/time.ts';
+import { rainOn, session, setFrame, settings } from './lib/state.ts';
+import { anchorFrom, applyServerTime, clock, rolloverJitterMs, snapshotAt, validLatest } from './lib/time.ts';
 import { exposeDebug } from './lib/debug.ts';
 
 const TICK_MS = 30_000;
@@ -50,6 +50,10 @@ interface Activation {
     warned: Set<string>;
     lastStatusAt: number;
     lastIdleAt: number;
+    /** The computed snapshot the timeline was last built for; a change starts a rollover. */
+    boundary: number;
+    /** Document-level Escape handler, present while the panel is open. */
+    onEscape?: (e: KeyboardEvent) => void;
     rollover?: ReturnType<typeof setTimeout>;
     intervals: ReturnType<typeof setInterval>[];
     stops: (() => void)[];
@@ -130,6 +134,7 @@ export default class WeatherPlugin implements PluginInstance {
             warned: new Set(),
             lastStatusAt: Date.now(),
             lastIdleAt: 0,
+            boundary: 0,
             intervals: [],
             stops: [],
             registered: { route: false, menu: false, bar: false },
@@ -137,9 +142,7 @@ export default class WeatherPlugin implements PluginInstance {
         this.active = act;
 
         try {
-            applyServerTime(status.serverTime);
-            session.status = status;
-            session.snapshot = snapshotAt(clock.now());
+            this.applyStatus(act, status);
             session.health = { kind: 'ok' };
             session.panelOpen = false;
             setFrame(0);
@@ -236,7 +239,7 @@ export default class WeatherPlugin implements PluginInstance {
     private start(act: Activation): void {
         act.stops.push(watch(() => session.panelOpen, (open) => this.setBar(act, open), { flush: 'sync' }));
         act.stops.push(watch(
-            [() => settings.clouds, () => settings.radars, () => settings.precip, () => session.panelOpen, () => session.health],
+            [() => settings.clouds, () => settings.radars, () => settings.precipRegional, () => settings.precipGlobal, () => session.panelOpen, () => session.health],
             () => this.refreshControl(act),
             { flush: 'sync' }
         ));
@@ -250,9 +253,13 @@ export default class WeatherPlugin implements PluginInstance {
             },
             { deep: true }
         ));
-        act.stops.push(watch(() => session.snapshot, () => {
+        act.stops.push(watch([() => session.snapshot, () => session.latest], () => {
             void this.sync(act);
         }));
+        // Without Rain there is no forecast: leave the forecast frames.
+        act.stops.push(watch(() => rainOn(settings), (on) => {
+            if (!on && session.frame > 0) setFrame(0);
+        }, { flush: 'sync' }));
 
         act.intervals.push(setInterval(() => this.tick(act), TICK_MS));
         act.intervals.push(setInterval(() => void this.refreshStatus(act, false), STATUS_REFRESH_MS));
@@ -268,7 +275,10 @@ export default class WeatherPlugin implements PluginInstance {
         }
     }
 
-    /** The bottom bar item exists only while the panel is open. */
+    /**
+     * The bottom bar item exists only while the panel is open. The panel always opens
+     * and closes on Now, and Escape closes it only while it is open.
+     */
     private setBar(act: Activation, open: boolean): void {
         if (act.dead || open === act.registered.bar) return;
         try {
@@ -278,6 +288,28 @@ export default class WeatherPlugin implements PluginInstance {
         } catch (err) {
             console.warn('[weather] Could not update the weather bar', err);
         }
+        if (act.registered.bar !== open) return;
+
+        setFrame(0);
+        if (open) this.addEscape(act);
+        else this.removeEscape(act);
+    }
+
+    private addEscape(act: Activation): void {
+        if (act.onEscape || typeof document === 'undefined') return;
+        const onEscape = (e: KeyboardEvent): void => {
+            if (e.key !== 'Escape' || e.defaultPrevented || act.dead) return;
+            session.panelOpen = false;
+            void nextTick().then(() => focusWeatherControl());
+        };
+        act.onEscape = onEscape;
+        document.addEventListener('keydown', onEscape);
+    }
+
+    private removeEscape(act: Activation): void {
+        if (!act.onEscape) return;
+        if (typeof document !== 'undefined') document.removeEventListener('keydown', act.onEscape);
+        act.onEscape = undefined;
     }
 
     /** Keep the control's pressed state, dot and tooltip in line with the session. */
@@ -285,44 +317,72 @@ export default class WeatherPlugin implements PluginInstance {
         const control = act.control;
         if (act.dead || !control) return;
         const open = session.panelOpen;
-        const anyLayer = settings.clouds || settings.radars || settings.precip !== 'none';
+        const anyLayer = settings.clouds || settings.radars || rainOn(settings);
         const message = healthMessage(session.health);
         control.setOpen(open);
         control.setActive(!open && anyLayer);
         control.setTitle(message ? `Weather: ${message}` : 'Weather');
     }
 
+    /** Take over a status: server clock, per-layer latest and the anchor of the timeline. */
+    private applyStatus(act: Activation, status: RelayStatus): void {
+        applyServerTime(status.serverTime);
+        const nowMs = clock.now();
+        const latest = validLatest(status.latest, nowMs);
+        session.status = status;
+        // Keep the object when nothing changed, so watchers do not fire for nothing.
+        if (JSON.stringify(latest) !== JSON.stringify(session.latest)) session.latest = latest;
+        session.snapshot = anchorFrom(latest, status.snapshot, nowMs);
+        act.boundary = snapshotAt(nowMs);
+    }
+
     /** Pick up a new 10-minute snapshot (after a random delay) and retry held changes. */
     private tick(act: Activation): void {
         if (act.dead) return;
 
-        if (snapshotAt(clock.now()) !== session.snapshot && act.rollover === undefined) {
+        if (snapshotAt(clock.now()) !== act.boundary && act.rollover === undefined) {
             act.rollover = setTimeout(() => {
                 act.rollover = undefined;
                 if (act.dead) return;
-                session.snapshot = snapshotAt(clock.now());
+                void this.rolloverRefresh(act);
             }, rolloverJitterMs());
         }
 
         if (act.queued) void this.sync(act);
     }
 
-    private async refreshStatus(act: Activation, force: boolean): Promise<void> {
-        if (act.dead) return;
-        if (!force && Date.now() - act.lastStatusAt < STATUS_MIN_GAP_MS) return;
+    /**
+     * A new 10-minute boundary: ask for the per-layer latest again. When the relay cannot
+     * answer, fall back to the computed snapshot and no per-layer latest.
+     */
+    private async rolloverRefresh(act: Activation): Promise<void> {
+        const ok = await this.refreshStatus(act, true);
+        if (ok || act.dead || this.active !== act) return;
+        const nowMs = clock.now();
+        act.boundary = snapshotAt(nowMs);
+        if (Object.keys(session.latest).length > 0) session.latest = {};
+        session.snapshot = snapshotAt(nowMs);
+    }
+
+    /** True when a fresh, usable status was applied. */
+    private async refreshStatus(act: Activation, force: boolean): Promise<boolean> {
+        if (act.dead) return false;
+        if (!force && Date.now() - act.lastStatusAt < STATUS_MIN_GAP_MS) return false;
         act.lastStatusAt = Date.now();
 
         const { status, reason } = await fetchStatus(host);
-        if (act.dead || this.active !== act) return;
+        if (act.dead || this.active !== act) return false;
 
         if (reason === 'ok' && status) {
-            applyServerTime(status.serverTime);
-            session.status = status;
+            this.applyStatus(act, status);
             this.tick(act);
-        } else if (reason === 'disabled' || reason === 'not-found' || reason === 'unsupported') {
+            return true;
+        }
+        if (reason === 'disabled' || reason === 'not-found' || reason === 'unsupported') {
             this.logInactive(reason);
             this.teardown();
         }
+        return false;
     }
 
     /**
@@ -403,6 +463,7 @@ export default class WeatherPlugin implements PluginInstance {
 
         act.dead = true;
         act.seq++;
+        this.removeEscape(act);
         for (const timer of act.intervals) clearInterval(timer);
         act.intervals = [];
         if (act.rollover !== undefined) clearTimeout(act.rollover);
@@ -451,7 +512,7 @@ export default class WeatherPlugin implements PluginInstance {
         }
 
         session.panelOpen = false;
-        session.draftFrame = null;
+        setFrame(0);
         session.health = { kind: 'ok' };
     }
 }
