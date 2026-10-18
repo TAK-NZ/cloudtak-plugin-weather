@@ -167,18 +167,6 @@ describe('formatClock', () => {
         expect(formatClock(Date.parse('2026-01-15T00:00:00Z') / 1000, 'UTC')).toBe('Thu 00:00 UTC');
     });
 
-    it('maps GMT+13 / GMT+12 from the formatter to NZDT / NZST', () => {
-        const fake = (name: string) => () => ({
-            formatToParts: () => [
-                { type: 'weekday', value: 'Thu' }, { type: 'literal', value: ' ' },
-                { type: 'hour', value: '14' }, { type: 'literal', value: ':' },
-                { type: 'minute', value: '20' }, { type: 'timeZoneName', value: name },
-            ],
-        }) as unknown as Intl.DateTimeFormat;
-        expect(formatClock(0, 'Pacific/Auckland', fake('GMT+13'))).toBe('Thu 14:20 NZDT');
-        expect(formatClock(0, 'Pacific/Auckland', fake('GMT+12'))).toBe('Thu 14:20 NZST');
-    });
-
     it('uses the device zone for local', () => {
         const out = formatClock(Date.parse('2026-01-15T00:00:00Z') / 1000, 'local');
         expect(out).toMatch(/^[A-Z][a-z]{2} \d{2}:\d{2}/);
@@ -208,29 +196,36 @@ describe('formatHm', () => {
 describe('frameLabel', () => {
     const anchor = Date.parse('2026-01-15T00:00:00Z') / 1000;
     it.each([
-        [0, 'Pacific/Auckland', 'Now · 13:00', 'Now · Thu 13:00 NZDT'],
-        [0, 'UTC', 'Now · 00:00', 'Now · Thu 00:00 UTC'],
-        [-4, 'Pacific/Auckland', '-40 min · 12:20', '-40 min · Thu 12:20 NZDT'],
-        [-4, 'UTC', '-40 min · 23:20', '-40 min · Wed 23:20 UTC'],
-        [-12, 'Pacific/Auckland', '-120 min · 11:00', '-120 min · Thu 11:00 NZDT'],
-        [3, 'Pacific/Auckland', '+30 min · 13:30', '+30 min · Thu 13:30 NZDT'],
-        [3, 'UTC', '+30 min · 00:30', '+30 min · Thu 00:30 UTC'],
-        [24, 'Pacific/Auckland', '+240 min · 17:00', '+240 min · Thu 17:00 NZDT'],
-    ] as const)('frame %s in %s', (frame, tz, text, title) => {
-        expect(frameLabel({ frame, anchor, tz })).toEqual({ text, title });
+        [0, 'Pacific/Auckland', 'Now · 13:00', 'NZDT', 'Now · Thu 13:00 NZDT'],
+        [0, 'UTC', 'Now · 00:00', 'UTC', 'Now · Thu 00:00 UTC'],
+        [-4, 'Pacific/Auckland', '-40 min · 12:20', 'NZDT', '-40 min · Thu 12:20 NZDT'],
+        [-4, 'UTC', '-40 min · 23:20', 'UTC', '-40 min · Wed 23:20 UTC'],
+        [-12, 'Pacific/Auckland', '-120 min · 11:00', 'NZDT', '-120 min · Thu 11:00 NZDT'],
+        [3, 'Pacific/Auckland', '+30 min · 13:30', 'NZDT', '+30 min · Thu 13:30 NZDT'],
+        [3, 'UTC', '+30 min · 00:30', 'UTC', '+30 min · Thu 00:30 UTC'],
+        [24, 'Pacific/Auckland', '+240 min · 17:00', 'NZDT', '+240 min · Thu 17:00 NZDT'],
+    ] as const)('frame %s in %s', (frame, tz, base, zone, title) => {
+        expect(frameLabel({ frame, anchor, tz })).toEqual({ base, zone, text: `${base} ${zone}`, title });
+    });
+    it('decides the zone from the frame instant across a DST change', () => {
+        const edge = Date.parse('2026-09-26T14:00:00Z') / 1000;
+        expect(frameLabel({ frame: -1, anchor: edge, tz: 'Pacific/Auckland' }).text).toBe('-10 min · 01:50 NZST');
+        expect(frameLabel({ frame: 0, anchor: edge, tz: 'Pacific/Auckland' }).text).toBe('Now · 03:00 NZDT');
     });
     it('uses the device zone for local', () => {
         const l = frameLabel({ frame: -2, anchor, tz: 'local' });
-        expect(l.text).toMatch(/^-20 min · \d{2}:\d{2}$/);
+        expect(l.base).toMatch(/^-20 min · \d{2}:\d{2}$/);
+        expect(l.text).toBe(`${l.base} ${l.zone}`);
+        expect(l.zone).not.toBe('');
         expect(l.title).toMatch(/^-20 min · [A-Z][a-z]{2} \d{2}:\d{2}/);
     });
     it('has no approximation marker', () => {
         expect(frameLabel({ frame: 0, anchor, tz: 'UTC' }).text).not.toContain('~');
     });
     it('clamps a bad frame', () => {
-        expect(frameLabel({ frame: 99, anchor, tz: 'UTC' }).text).toBe('+240 min · 04:00');
-        expect(frameLabel({ frame: -99, anchor, tz: 'UTC' }).text).toBe('-120 min · 22:00');
-        expect(frameLabel({ frame: NaN, anchor, tz: 'UTC' }).text).toBe('Now · 00:00');
+        expect(frameLabel({ frame: 99, anchor, tz: 'UTC' }).text).toBe('+240 min · 04:00 UTC');
+        expect(frameLabel({ frame: -99, anchor, tz: 'UTC' }).text).toBe('-120 min · 22:00 UTC');
+        expect(frameLabel({ frame: NaN, anchor, tz: 'UTC' }).text).toBe('Now · 00:00 UTC');
     });
 });
 describe('debounce', () => {

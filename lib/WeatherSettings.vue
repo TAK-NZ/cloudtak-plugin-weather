@@ -163,6 +163,9 @@
             <legend class='card-title fs-4 mb-1'>
                 Time zone
             </legend>
+            <p class='text-secondary small m-0'>
+                The zone is shown after the time in the timeline.
+            </p>
             <label
                 v-for='tz in ZONES'
                 :key='tz.value'

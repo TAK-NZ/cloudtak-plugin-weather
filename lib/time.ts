@@ -1,5 +1,6 @@
 import type { TimeZoneSetting, WeatherLayer } from './types.ts';
 import { WEATHER_LAYERS } from './constants.ts';
+import { zoneLabel } from './zone-label.ts';
 
 export const STEP_MIN = 10;
 export const MAX_FORECAST_MIN = 240;
@@ -110,36 +111,28 @@ function part(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTyp
     return parts.find((p) => p.type === type)?.value ?? '';
 }
 
-function format(epochS: number, zone: string | undefined, make: FormatterFactory): { text: string; hm: string; zoneName: string } {
+function format(epochS: number, zone: string | undefined, make: FormatterFactory): { text: string; hm: string } {
     const parts = make({
         ...(zone ? { timeZone: zone } : {}),
         weekday: 'short',
         hour: '2-digit',
         minute: '2-digit',
         hourCycle: 'h23',
-        timeZoneName: 'short',
     }).formatToParts(new Date(epochS * 1000));
     const hm = `${part(parts, 'hour')}:${part(parts, 'minute')}`;
     return {
         text: `${part(parts, 'weekday')} ${hm}`,
         hm,
-        zoneName: part(parts, 'timeZoneName'),
     };
 }
 
 /**
- * "Thu 14:20 NZST". Falls back to UTC when the zone is not supported.
+ * "Thu 14:20 NZST", the zone name from zoneLabel. Falls back to UTC when the zone is not supported.
  */
 export function formatClock(epochS: number, tz: TimeZoneSetting, make: FormatterFactory = defaultFactory): string {
     try {
-        if (tz === 'UTC') return `${format(epochS, 'UTC', make).text} UTC`;
-        const f = format(epochS, tz === 'local' ? undefined : tz, make);
-        let name = f.zoneName;
-        if (tz === 'Pacific/Auckland') {
-            if (name === 'GMT+13') name = 'NZDT';
-            else if (name === 'GMT+12') name = 'NZST';
-        }
-        return name ? `${f.text} ${name}` : f.text;
+        const f = format(epochS, tz === 'UTC' ? 'UTC' : tz === 'local' ? undefined : tz, make);
+        return `${f.text} ${zoneLabel(epochS * 1000, tz)}`;
     } catch (err) {
         if (!(err instanceof RangeError)) throw err;
         return `${format(epochS, 'UTC', make).text} UTC`;
@@ -157,10 +150,14 @@ export function formatHm(epochS: number, tz: TimeZoneSetting, make: FormatterFac
 }
 
 export interface FrameLabel {
-    /** Compact text: "Now · 14:20", "-40 min · 13:40" or "+30 min · 14:50". */
+    /** Full text with the zone: "Now · 14:20 NZDT", "-40 min · 13:40 NZST". */
     text: string;
     /** Full text with weekday and zone, for the tooltip. */
     title: string;
+    /** The text without the zone: "-40 min · 13:40". */
+    base: string;
+    /** Zone of that frame's instant: "NZDT", "NZST", "UTC" or the device zone. */
+    zone: string;
 }
 
 function offsetText(frame: number): string {
@@ -177,9 +174,13 @@ export function frameLabel(opts: {
     const frame = clampFrame(opts.frame);
     const t = frameTimeS(opts.anchor, frame);
     const offset = offsetText(frame);
+    const base = `${offset} · ${formatHm(t, opts.tz, opts.make)}`;
+    const zone = zoneLabel(t * 1000, opts.tz);
     return {
-        text: `${offset} · ${formatHm(t, opts.tz, opts.make)}`,
+        text: `${base} ${zone}`,
         title: `${offset} · ${formatClock(t, opts.tz, opts.make)}`,
+        base,
+        zone,
     };
 }
 

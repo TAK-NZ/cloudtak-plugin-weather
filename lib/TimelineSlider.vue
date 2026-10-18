@@ -30,6 +30,7 @@
             type='button'
             class='btn btn-sm btn-outline-secondary flex-shrink-0 taknz-wx-now'
             data-test='now'
+            :title='nowTitle'
             :disabled='disabled || shownFrame === 0'
             @click='onNow'
         >
@@ -62,18 +63,25 @@
                 :style='markStyle'
             />
         </div>
-        <!-- Fixed width, so the slider never resizes while the label changes under the thumb. -->
+        <!-- The label box is as wide as its text but never narrower than 7.5rem, so the zone is never cut. -->
         <div
             class='d-flex align-items-center flex-shrink-0'
-            style='flex: 0 0 7.5rem; width: 7.5rem;'
+            style='flex: 0 0 auto; min-width: 7.5rem;'
+            data-test='label-box'
         >
             <span
-                class='text-nowrap text-truncate'
-                style='font-size: 0.8125rem; font-variant-numeric: tabular-nums; min-width: 0; flex: 0 1 auto;'
+                class='text-nowrap'
+                style='font-size: 0.8125rem; font-variant-numeric: tabular-nums;'
                 data-test='label'
                 :title='label.title'
-                v-text='label.text'
-            />
+            >
+                <span v-text='label.base' />{{ ' ' }}<span
+                    class='flex-shrink-0 text-secondary'
+                    style='font-size: 0.75rem;'
+                    data-test='label-zone'
+                    v-text='label.zone'
+                />
+            </span>
             <span
                 role='status'
                 class='d-inline-flex align-items-center flex-shrink-0'
@@ -111,6 +119,11 @@ const disabled = computed(() => !settings.clouds && !settings.radars && !rainOn(
 const playTitle = computed(() => disabled.value ? PLAY_DISABLED_TITLE : session.playing ? 'Pause' : 'Play');
 const bounds = computed(() => frameBounds(rainOn(settings)));
 const shownFrame = computed(() => clampFrame(session.draftFrame ?? session.frame, bounds.value.max));
+
+const nowTitle = computed(() => {
+    const now = frameLabel({ frame: 0, anchor: session.snapshot, tz: settings.timeZone });
+    return `Back to ${now.text}`;
+});
 
 const label = computed(() => frameLabel({
     frame: shownFrame.value,

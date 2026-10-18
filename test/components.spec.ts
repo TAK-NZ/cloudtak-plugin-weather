@@ -244,21 +244,21 @@ describe('TimelineSlider', () => {
         expect(session.frame).toBe(0);
     });
 
-    it('shows a compact label and uses it as aria-valuetext', async () => {
+    it('shows the label with the time zone and uses it as aria-valuetext', async () => {
         setRain('precip');
         wrapper = mount(TimelineSlider);
-        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 00:00');
-        expect(slider().attributes('aria-valuetext')).toBe('Now · 00:00');
+        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 00:00 UTC');
+        expect(slider().attributes('aria-valuetext')).toBe('Now · 00:00 UTC');
 
         setFrame(12);
         await nextTick();
-        expect(wrapper.get('[data-test=label]').text()).toBe('+120 min · 02:00');
-        expect(slider().attributes('aria-valuetext')).toBe('+120 min · 02:00');
+        expect(wrapper.get('[data-test=label]').text()).toBe('+120 min · 02:00 UTC');
+        expect(slider().attributes('aria-valuetext')).toBe('+120 min · 02:00 UTC');
 
         setFrame(-4);
         await nextTick();
-        expect(wrapper.get('[data-test=label]').text()).toBe('-40 min · 23:20');
-        expect(slider().attributes('aria-valuetext')).toBe('-40 min · 23:20');
+        expect(wrapper.get('[data-test=label]').text()).toBe('-40 min · 23:20 UTC');
+        expect(slider().attributes('aria-valuetext')).toBe('-40 min · 23:20 UTC');
         expect(wrapper.get('[data-test=label]').attributes('title')).toBe('-40 min · Wed 23:20 UTC');
     });
 
@@ -267,14 +267,29 @@ describe('TimelineSlider', () => {
         wrapper = mount(TimelineSlider);
         setTimeZone('Pacific/Auckland');
         await nextTick();
-        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 13:00');
+        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 13:00 NZDT');
+        expect(wrapper.get('[data-test=label-zone]').text()).toBe('NZDT');
     });
 
-    it('the label is one truncating line, without the old approximation marker', () => {
+    it('shows the zone in its own muted span after the time, and in the Now tooltip', async () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
+        setTimeZone('Pacific/Auckland');
+        await nextTick();
+        expect(wrapper.get('[data-test=label-zone]').classes()).toContain('text-secondary');
+        expect(wrapper.get('[data-test=now]').attributes('title')).toBe('Back to Now · 13:00 NZDT');
+        setTimeZone('UTC');
+        await nextTick();
+        expect(wrapper.get('[data-test=label-zone]').text()).toBe('UTC');
+        expect(wrapper.get('[data-test=now]').attributes('title')).toBe('Back to Now · 00:00 UTC');
+    });
+
+    it('the label is one non-wrapping line that is not truncated, without the old approximation marker', () => {
         setRain('precip');
         wrapper = mount(TimelineSlider);
         const label = wrapper.get('[data-test=label]');
-        expect(label.classes()).toContain('text-truncate');
+        expect(label.classes()).toContain('text-nowrap');
+        expect(label.classes()).not.toContain('text-truncate');
         expect(label.text()).not.toContain('~');
         expect(wrapper.find('[data-test=note]').exists()).toBe(false);
     });
@@ -443,6 +458,10 @@ describe('WeatherSettings', () => {
         await box.setValue(true);
         expect(settings.playForecast).toBe(true);
     });
+    it('tells where the time zone is shown', () => {
+        wrapper = mount(WeatherSettings);
+        expect(wrapper.get('[aria-label="Time zone"]').text()).toContain('The zone is shown after the time in the timeline.');
+    });
     it('holds the explanations and the Rainbow.ai link that the panel no longer shows', () => {
         wrapper = mount(WeatherSettings);
         const link = wrapper.get('[data-test=attribution-link]');
@@ -495,7 +514,7 @@ describe('WeatherBar', () => {
         toggleLayer('clouds', true);
         toggleLayer('radars', true);
         wrapper = mount(WeatherBar);
-        const rest = text().replace(/Clouds|Radar|Rain|Off|Regional|Global|Now|[\d:+\-·]|min/g, '').trim();
+        const rest = text().replace(/Clouds|Radar|Rain|Off|Regional|Global|Now|UTC|[\d:+\-·]|min/g, '').trim();
         expect(rest).toBe('');
         expect(text()).toContain('Now · 00:00');
     });
