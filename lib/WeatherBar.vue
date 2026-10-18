@@ -1,7 +1,7 @@
 <template>
     <div
         class='position-relative'
-        style='width: min(640px, calc(100vw - 24px)); height: 50px;'
+        style='width: min(640px, calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))); height: 50px;'
         data-test='weather-bar'
     >
         <div
@@ -11,6 +11,7 @@
                 right: -9px;
                 bottom: -1px;
                 max-height: min(60vh, calc(100vh - 220px));
+                max-height: min(60dvh, calc(100dvh - 220px));
                 overflow: auto;
             '
             data-test='card'
