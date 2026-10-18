@@ -379,6 +379,8 @@ export default class WeatherPlugin implements PluginInstance {
         if (act.onEscape || typeof document === 'undefined') return;
         const onEscape = (e: KeyboardEvent): void => {
             if (e.key !== 'Escape' || e.defaultPrevented || act.dead) return;
+            // A modal (the image editor) owns Escape while it is open.
+            if (document.querySelector('[aria-modal="true"]')) return;
             session.panelOpen = false;
             void nextTick().then(() => focusWeatherControl());
         };

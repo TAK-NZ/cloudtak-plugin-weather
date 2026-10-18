@@ -921,6 +921,18 @@ describe('timeline', () => {
             expect(session.panelOpen).toBe(true);
         });
 
+        it('leaves Escape to an open modal dialog', async () => {
+            await open();
+            const modal = document.createElement('div');
+            modal.setAttribute('aria-modal', 'true');
+            document.body.append(modal);
+            escape();
+            expect(session.panelOpen).toBe(true);
+            modal.remove();
+            escape();
+            expect(session.panelOpen).toBe(false);
+        });
+
         it('is only listening while the panel is open', async () => {
             const add = vi.spyOn(document, 'addEventListener');
             const remove = vi.spyOn(document, 'removeEventListener');
