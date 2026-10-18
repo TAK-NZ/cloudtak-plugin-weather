@@ -226,22 +226,45 @@ describe('TimelineSlider', () => {
         stop();
     });
 
-    it('Now returns to frame 0 at once from the past and the future, and is disabled at 0', async () => {
+    it('Now returns to frame 0 at once from the past and the future, and only looks disabled at 0', async () => {
         setRain('precip');
         setFrame(9);
         wrapper = mount(TimelineSlider);
         const now = wrapper.get('[data-test=now]');
         expect(now.attributes('disabled')).toBeUndefined();
+        expect(now.attributes('aria-disabled')).toBeUndefined();
 
         await now.trigger('click');
         expect(session.frame).toBe(0);
-        expect(now.attributes('disabled')).toBeDefined();
+        // still focusable (no disabled attribute), but marked and styled as unavailable
+        expect(now.attributes('disabled')).toBeUndefined();
+        expect(now.attributes('aria-disabled')).toBe('true');
+        expect(now.classes()).toContain('taknz-wx-now-at');
 
         setFrame(-5);
         await nextTick();
         expect(now.attributes('disabled')).toBeUndefined();
+        expect(now.attributes('aria-disabled')).toBeUndefined();
+        expect(now.classes()).not.toContain('taknz-wx-now-at');
         await now.trigger('click');
         expect(session.frame).toBe(0);
+    });
+
+    it('Now keeps keyboard focus when activated, and does nothing at Now', async () => {
+        setRain('precip');
+        setFrame(-5);
+        wrapper = mount(TimelineSlider, { attachTo: document.body });
+        const now = wrapper.get('[data-test=now]');
+        (now.element as HTMLButtonElement).focus();
+        await now.trigger('click');
+        expect(session.frame).toBe(0);
+        expect(document.activeElement).toBe(now.element);
+
+        const draft = session.draftFrame;
+        await now.trigger('click');
+        expect(session.frame).toBe(0);
+        expect(session.draftFrame).toBe(draft);
+        expect(document.activeElement).toBe(now.element);
     });
 
     it('shows the label with the time zone and uses it as aria-valuetext', async () => {

@@ -29,9 +29,11 @@
         <button
             type='button'
             class='btn btn-sm btn-outline-secondary flex-shrink-0 taknz-wx-now'
+            :class='{ "taknz-wx-now-at": atNow }'
             data-test='now'
             :title='nowTitle'
-            :disabled='disabled || shownFrame === 0'
+            :disabled='disabled'
+            :aria-disabled='atNow ? "true" : undefined'
             @click='onNow'
         >
             Now
@@ -120,6 +122,9 @@ const playTitle = computed(() => disabled.value ? PLAY_DISABLED_TITLE : session.
 const bounds = computed(() => frameBounds(rainOn(settings)));
 const shownFrame = computed(() => clampFrame(session.draftFrame ?? session.frame, bounds.value.max));
 
+// At Now the button only looks disabled: a truly disabled button drops keyboard focus when it is activated.
+const atNow = computed(() => shownFrame.value === 0);
+
 const nowTitle = computed(() => {
     const now = frameLabel({ frame: 0, anchor: session.snapshot, tz: settings.timeZone });
     return `Back to ${now.text}`;
@@ -167,6 +172,7 @@ function onChange(e: Event): void {
 
 function onNow(): void {
     stopPlay();
+    if (atNow.value) return;
     commit.cancel();
     setFrame(0);
 }
@@ -186,6 +192,10 @@ onBeforeUnmount(() => {
 .taknz-wx-now {
     min-height: 44px;
     min-width: 44px;
+}
+.taknz-wx-now-at {
+    opacity: 0.65;
+    cursor: default;
 }
 .taknz-wx-play[aria-pressed='true'] {
     color: var(--tblr-primary, #4f8cff);
