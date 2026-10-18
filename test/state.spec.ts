@@ -43,7 +43,7 @@ describe('defaults', () => {
             radarsPrecipType: false,
             tileSize: 512,
             timeZone: 'Pacific/Auckland',
-            playForecast: false,
+            playForecast: true,
         });
         expect(settings).toEqual(defaultSettings());
     });
@@ -184,16 +184,16 @@ describe('settings migration', () => {
         expect(store.setItem).toHaveBeenCalledTimes(1);
     });
 
-    it('upgrades version 1 and 2 objects to playForecast false, in the one write', () => {
+    it('upgrades version 1 and 2 objects to playForecast true, in the one write', () => {
         for (const store of [v1({ clouds: true }), v2({ clouds: true })]) {
             bindStorage(store);
             expect(store.setItem).toHaveBeenCalledTimes(1);
             const written = JSON.parse((store.setItem.mock.calls[0] as [string, string])[1]) as Record<string, unknown>;
-            expect(written).toMatchObject({ version: 3, clouds: true, playForecast: false });
-            expect(settings.playForecast).toBe(false);
+            expect(written).toMatchObject({ version: 3, clouds: true, playForecast: true });
+            expect(settings.playForecast).toBe(true);
         }
     });
-    it('a version 3 object without playForecast loads with false and is not rewritten', () => {
+    it('a version 3 object without playForecast loads with true and is not rewritten', () => {
         const { playForecast, ...stored } = defaultSettings();
         void playForecast;
         const store = memory(JSON.stringify({ ...stored, clouds: true }));
@@ -202,14 +202,14 @@ describe('settings migration', () => {
         expect(store.setItem).not.toHaveBeenCalled();
     });
     it('round-trips playForecast and ignores a stored value that is not a boolean', () => {
-        expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: true }))).playForecast).toBe(true);
+        expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: false }))).playForecast).toBe(false);
         for (const junk of ['yes', 1, null, {}]) {
-            expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: junk }))).playForecast).toBe(false);
+            expect(loadSettings(memory(JSON.stringify({ ...defaultSettings(), playForecast: junk }))).playForecast).toBe(true);
         }
     });
     it('a version 2 object with extra junk keys still loads', () => {
         const out = loadSettings(v2({ precip: 'precip', surprise: { a: 1 }, playForecast: 'maybe' }));
-        expect(out).toMatchObject({ version: 3, precipRegional: true, playForecast: false });
+        expect(out).toMatchObject({ version: 3, precipRegional: true, playForecast: true });
         expect(out).not.toHaveProperty('surprise');
     });
     it('reads a version 3 object as it is and does not rewrite it', () => {
@@ -343,18 +343,18 @@ describe('setters', () => {
     it('setPlayForecast stores a boolean, saves it and ignores anything else', () => {
         const store = memory();
         bindStorage(store);
-        setPlayForecast(true);
-        expect(settings.playForecast).toBe(true);
+        setPlayForecast(false);
+        expect(settings.playForecast).toBe(false);
         setPlayForecast('yes' as never);
         setPlayForecast(undefined as never);
-        expect(settings.playForecast).toBe(true);
-        vi.advanceTimersByTime(1000);
-        expect(JSON.parse(store.data.get(STORAGE_KEY) as string).playForecast).toBe(true);
-    });
-    it('resetSettings restores playForecast false', () => {
-        setPlayForecast(true);
-        resetSettings();
         expect(settings.playForecast).toBe(false);
+        vi.advanceTimersByTime(1000);
+        expect(JSON.parse(store.data.get(STORAGE_KEY) as string).playForecast).toBe(false);
+    });
+    it('resetSettings restores playForecast true', () => {
+        setPlayForecast(false);
+        resetSettings();
+        expect(settings.playForecast).toBe(true);
     });
     it('resetSettings restores defaults', () => {
         setRain('precip');

@@ -23,7 +23,7 @@ export function defaultSettings(): WeatherSettings {
         radarsPrecipType: false,
         tileSize: 512,
         timeZone: 'Pacific/Auckland',
-        playForecast: false,
+        playForecast: true,
     };
 }
 
@@ -62,7 +62,7 @@ interface Stored {
  * Read and sanitise stored settings. Any non-string result of getItem (null, or
  * undefined as the test stub returns) counts as absent; anything unusable gives defaults.
  * A missing, 1 or 2 version is an old object: it is sanitised and migrated to the current
- * version. Version 3 is current (a version 3 object without `playForecast` gets false).
+ * version. Version 3 is current (a version 3 object without `playForecast` gets the default true).
  * Any other version gives defaults.
  * Versions up to 2 stored Rain as one mode ('none' | 'precip' | 'precip-global'); it becomes
  * the two Rain switches, and the Global Rain opacity starts as the Rain opacity.

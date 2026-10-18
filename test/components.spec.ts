@@ -432,16 +432,16 @@ describe('WeatherSettings', () => {
         expect(wrapper.find('input[type=radio][data-test^=rain]').exists()).toBe(false);
     });
 
-    it('offers Include forecast when playing (off by default) and says that Play loads more tiles', async () => {
+    it('offers Include forecast when playing (on by default) and says that Play loads more tiles', async () => {
         wrapper = mount(WeatherSettings);
         const box = wrapper.get('[data-test=play-forecast]');
-        expect((box.element as HTMLInputElement).checked).toBe(false);
+        expect((box.element as HTMLInputElement).checked).toBe(true);
         expect(wrapper.text()).toContain('Include forecast when playing');
         expect(wrapper.text()).toContain('Sharper (about 4x requests; Play loads more tiles)');
-        await box.setValue(true);
-        expect(settings.playForecast).toBe(true);
         await box.setValue(false);
         expect(settings.playForecast).toBe(false);
+        await box.setValue(true);
+        expect(settings.playForecast).toBe(true);
     });
     it('holds the explanations and the Rainbow.ai link that the panel no longer shows', () => {
         wrapper = mount(WeatherSettings);
