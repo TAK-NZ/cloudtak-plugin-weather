@@ -139,9 +139,7 @@ describe('timeline snapshots', () => {
         expect(rainFrame(24, A, hm(23, 10), nowMs)).toEqual({ snapshot: hm(23, 10), forecast: 240 });
         expect(rainFrame(3, A, undefined, nowMs)).toEqual({ snapshot: A, forecast: 30 });
     });
-    it('clouds and radar hold their newest frame after Now', () => {
-        expect(holdSnapshot(3, A, nowMs)).toBe(A);
-        expect(holdSnapshot(24, A, nowMs)).toBe(A);
+    it('clouds and radar: the past is exact, Now is the anchor (forecast frames have no request, see layers.spec)', () => {
         expect(holdSnapshot(0, A, nowMs)).toBe(A);
         expect(holdSnapshot(-1, A, nowMs)).toBe(hm(23, 10));
         expect(holdSnapshot(-12, A, nowMs)).toBe(hm(21, 20));

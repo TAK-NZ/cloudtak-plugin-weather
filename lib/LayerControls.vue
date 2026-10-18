@@ -6,8 +6,9 @@
         <button
             type='button'
             class='btn d-inline-flex align-items-center gap-1'
-            :class='settings.clouds ? "btn-primary" : "btn-outline-secondary"'
+            :class='[settings.clouds ? "btn-primary" : "btn-outline-secondary", { "taknz-wx-no-forecast": dimmed("clouds") }]'
             :aria-pressed='settings.clouds ? "true" : "false"'
+            :title='dimmed("clouds") ? NO_FORECAST : undefined'
             data-test='toggle-clouds'
             style='min-height: 44px; min-width: 44px;'
             @click='toggleLayer("clouds")'
@@ -18,16 +19,9 @@
             />
             <span>Clouds</span>
             <span
-                v-if='showNow && settings.clouds'
-                class='d-inline-block rounded-circle bg-secondary'
-                style='width: 6px; height: 6px; opacity: 0.8;'
-                data-test='now-clouds'
-                :title='NOW_TITLE'
-            />
-            <span
-                v-if='showNow && settings.clouds'
+                v-if='dimmed("clouds")'
                 class='visually-hidden'
-            >, latest frame only</span>
+            >, no forecast</span>
         </button>
         <button
             v-for='chip in RAIN_CHIPS'
@@ -50,8 +44,9 @@
         <button
             type='button'
             class='btn d-inline-flex align-items-center gap-1'
-            :class='settings.radars ? "btn-primary" : "btn-outline-secondary"'
+            :class='[settings.radars ? "btn-primary" : "btn-outline-secondary", { "taknz-wx-no-forecast": dimmed("radars") }]'
             :aria-pressed='settings.radars ? "true" : "false"'
+            :title='dimmed("radars") ? NO_FORECAST : undefined'
             data-test='toggle-radars'
             style='min-height: 44px; min-width: 44px;'
             @click='toggleLayer("radars")'
@@ -62,16 +57,9 @@
             />
             <span>Radar</span>
             <span
-                v-if='showNow && settings.radars'
-                class='d-inline-block rounded-circle bg-secondary'
-                style='width: 6px; height: 6px; opacity: 0.8;'
-                data-test='now-radars'
-                :title='NOW_TITLE'
-            />
-            <span
-                v-if='showNow && settings.radars'
+                v-if='dimmed("radars")'
                 class='visually-hidden'
-            >, latest frame only</span>
+            >, no forecast</span>
         </button>
         <slot />
     </div>
@@ -83,13 +71,20 @@ import { IconCloud, IconCloudRain, IconRadar, IconWorld } from '@tabler/icons-vu
 import type { ToggleKey } from './types.ts';
 import { rainOn, session, settings, toggleLayer } from './state.ts';
 
-const NOW_TITLE = 'Shows the latest frame; no forecast';
+const NO_FORECAST = 'No forecast';
 
 const RAIN_CHIPS: { key: ToggleKey; test: string; label: string; icon: typeof IconCloudRain }[] = [
     { key: 'precipRegional', test: 'toggle-precip', label: 'Rain Regional', icon: IconCloudRain },
     { key: 'precipGlobal', test: 'toggle-precip-global', label: 'Rain Global', icon: IconWorld },
 ];
 
-// Clouds and radar hold their newest frame in the forecast; mark that quietly.
-const showNow = computed(() => session.frame > 0 && rainOn(settings));
+// Clouds and Radar have no forecast: they are hidden in forecast frames, so their chip is dimmed.
+const noForecast = computed(() => session.frame > 0 && rainOn(settings));
+const dimmed = (key: 'clouds' | 'radars'): boolean => noForecast.value && settings[key];
 </script>
+
+<style scoped>
+.taknz-wx-no-forecast {
+    opacity: 0.55;
+}
+</style>

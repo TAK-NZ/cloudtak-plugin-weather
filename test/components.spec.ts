@@ -83,29 +83,59 @@ describe('LayerControls', () => {
         expect(settings.radars).toBe(false);
     });
 
-    it('shows a quiet now dot on clouds and radar only in the forecast, with Rain on', async () => {
+    it('dims the Clouds and Radar chips with a No forecast title only in forecast frames, with Rain on', async () => {
         toggleLayer('clouds', true);
         toggleLayer('radars', true);
         setRain('precip-global');
         wrapper = mount(LayerControls);
-        expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
-        expect(wrapper.find('[data-test=now-radars]').exists()).toBe(false);
-
-        setFrame(-4);
-        await nextTick();
-        expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
-
+        const chip = (t: string) => wrapper!.get(`[data-test=toggle-${t}]`);
+        const dim = (t: string): boolean => chip(t).classes().includes('taknz-wx-no-forecast');
+        for (const frame of [0, -4]) {
+            setFrame(frame);
+            await nextTick();
+            for (const t of ['clouds', 'radars']) {
+                expect(dim(t)).toBe(false);
+                expect(chip(t).attributes('title')).toBeUndefined();
+                expect(chip(t).text()).not.toContain('no forecast');
+            }
+        }
         setFrame(6);
         await nextTick();
-        expect(wrapper.get('[data-test=now-clouds]').attributes('title')).toBe('Shows the latest frame; no forecast');
-        expect(wrapper.get('[data-test=now-radars]').text()).toBe('');
-        expect(wrapper.get('[data-test=toggle-clouds]').text()).toContain('latest frame only');
-        expect(wrapper.find('.badge').exists()).toBe(false);
-
-        toggleLayer('clouds', false);
-        await nextTick();
+        for (const t of ['clouds', 'radars']) {
+            expect(dim(t)).toBe(true);
+            expect(chip(t).attributes('title')).toBe('No forecast');
+            expect(chip(t).find('.visually-hidden').text()).toBe(', no forecast');
+            expect(chip(t).attributes('aria-pressed')).toBe('true');
+        }
+        // the old marks are gone
         expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
-        expect(wrapper.find('[data-test=now-radars]').exists()).toBe(true);
+        expect(wrapper.find('[data-test=now-radars]').exists()).toBe(false);
+        expect(wrapper.text()).not.toContain('latest frame only');
+        expect(wrapper.find('.badge').exists()).toBe(false);
+        // the Rain chips are never dimmed
+        expect(wrapper.get('[data-test=toggle-precip-global]').classes()).not.toContain('taknz-wx-no-forecast');
+        // toggling a dimmed chip still works, and a switched-off chip is not dimmed
+        await chip('clouds').trigger('click');
+        expect(settings.clouds).toBe(false);
+        expect(dim('clouds')).toBe(false);
+        expect(chip('clouds').attributes('title')).toBeUndefined();
+        expect(dim('radars')).toBe(true);
+        await chip('clouds').trigger('click');
+        expect(settings.clouds).toBe(true);
+        expect(dim('clouds')).toBe(true);
+    });
+    it('does not dim anything without a Rain layer', async () => {
+        toggleLayer('clouds', true);
+        toggleLayer('radars', true);
+        setRain('precip');
+        wrapper = mount(LayerControls);
+        setFrame(6);
+        await nextTick();
+        expect(wrapper.get('[data-test=toggle-clouds]').classes()).toContain('taknz-wx-no-forecast');
+        setRain('none');
+        await nextTick();
+        expect(wrapper.get('[data-test=toggle-clouds]').classes()).not.toContain('taknz-wx-no-forecast');
+        expect(wrapper.get('[data-test=toggle-radars]').attributes('title')).toBeUndefined();
     });
 });
 
@@ -497,7 +527,8 @@ describe('WeatherSettings', () => {
         expect(layers).toContain('Regional');
         const timeline = wrapper.get('[data-test=about-timeline]').text();
         expect(timeline).toContain('last 2 hours');
-        expect(timeline).toContain('hold their newest frame');
+        expect(timeline).toContain('Clouds and Radar have no forecast; they are hidden in forecast frames.');
+        expect(timeline).not.toContain('hold their newest frame');
     });
 });
 

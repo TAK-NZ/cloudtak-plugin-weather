@@ -12,7 +12,7 @@ import { host } from './lib/host.ts';
 import { BOTTOM_KEY, ID_PREFIX, MENU_KEY, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
 import { TokenUnavailableError, fetchStatus, tileTemplate } from './lib/relay-client.ts';
 import type { StatusReason } from './lib/relay-client.ts';
-import { LayerStack, SLOT_ORDER, computeDesired, isSelected, requestFor } from './lib/layers.ts';
+import { LayerStack, SLOT_ORDER, computeDesired, isSelected, noForecastAt, requestFor } from './lib/layers.ts';
 import type { MapLike, PreloadUrls } from './lib/layers.ts';
 import { MAX_SUSPEND_MS, Player, bindPlayer, playRange } from './lib/player.ts';
 import { HealthMonitor, healthMessage } from './lib/health.ts';
@@ -474,6 +474,11 @@ export default class WeatherPlugin implements PluginInstance {
             try {
                 const req = requestFor(slot, settings, session);
                 if (req) tiles[slot] = await tileTemplate(host, req);
+                else if (noForecastAt(slot, settings, session.frame)) {
+                    // No forecast for this slot: it stays in the stack hidden, on the URL it has.
+                    const old = act.applied[slot];
+                    if (old !== undefined) tiles[slot] = old;
+                }
             } catch (err) {
                 failed[slot] = err;
             }

@@ -98,7 +98,11 @@ export function rainFrame(
     return { snapshot: lowerGuard(rainLatest ?? anchor, nowMs), forecast: frame * STEP_MIN };
 }
 
-/** Clouds and radar: the past is exact, they hold their newest frame after Now. */
+/**
+ * Clouds and radar: the past is exact. Used for frames k <= 0 only (they have no request in
+ * forecast frames); a layer that lags the others repeats its newest frame at k = 0.
+ * Frames above 0 still return the Now snapshot, as a safe answer for a caller that passes one.
+ */
 export function holdSnapshot(frame: number, anchor: number, nowMs: number): number {
     return lowerGuard(frameTimeS(anchor, Math.min(frame, 0)), nowMs);
 }

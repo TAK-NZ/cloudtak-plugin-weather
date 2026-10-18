@@ -676,7 +676,7 @@ describe('timeline', () => {
         return map;
     }
 
-    it('anchors the timeline on the newest layer and holds a lagging clouds layer', async () => {
+    it('anchors the timeline on the newest layer; a lagging clouds layer repeats its frame at Now and is hidden in the forecast', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(T0);
         const A = snapshotAt(T0);
@@ -698,11 +698,46 @@ describe('timeline', () => {
         expect(snapParam(src(map, 'precip'))).toBe(String(A - 600));
         expect(forecastParam(src(map, 'precip'))).toBe('0');
 
-        setFrame(3);
+        setFrame(0);
         await vi.advanceTimersByTimeAsync(0);
         expect(snapParam(src(map, 'clouds'))).toBe(String(A));
+        map.resetCounters();
+        setFrame(3);
+        await vi.advanceTimersByTimeAsync(0);
+        // Clouds and Radar keep their layers and their URL, but are not drawn: no tile requests
+        expect(snapParam(src(map, 'clouds'))).toBe(String(A));
+        expect(snapParam(src(map, 'radars'))).toBe(String(A));
+        expect(map.isDrawn('taknz-wx-clouds')).toBe(false);
+        expect(map.isDrawn('taknz-wx-radars')).toBe(false);
+        expect(map.isDrawn('taknz-wx-precip')).toBe(true);
+        expect(map.tilesLog.filter((t) => t.source.includes('clouds') || t.source.includes('radars'))).toEqual([]);
+        expect(map.counters.addLayer + map.counters.removeLayer + map.counters.moveLayer).toBe(0);
         expect(snapParam(src(map, 'precip'))).toBe(String(A));
         expect(forecastParam(src(map, 'precip'))).toBe('30');
+        // back in the past: the same layers return, nothing is added
+        setFrame(-1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(snapParam(src(map, 'clouds'))).toBe(String(A - 600));
+        expect(map.isDrawn('taknz-wx-clouds')).toBe(true);
+        expect(map.isDrawn('taknz-wx-radars')).toBe(true);
+        expect(map.counters.addLayer + map.counters.removeLayer + map.counters.moveLayer).toBe(0);
+    });
+    it('Clouds switched on in a forecast frame stays off until a past frame, then appears', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(T0);
+        statusFollowingClock();
+        setRain('precip');
+        const map = await start();
+        setFrame(6);
+        await vi.advanceTimersByTimeAsync(0);
+        toggleLayer('clouds', true);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(map.getLayer('taknz-wx-clouds')).toBeUndefined();
+        expect(map.sources.has('taknz-wx-clouds-src')).toBe(false);
+        setFrame(0);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(map.getLayer('taknz-wx-clouds')).toBeDefined();
+        expect(map.isDrawn('taknz-wx-clouds')).toBe(true);
     });
 
     it('the anchor is the newest latest, not the status snapshot', async () => {
@@ -1004,6 +1039,42 @@ describe('play', () => {
         expect(new URL(map.sources.get('taknz-wx-precip-src')?.tiles[0] ?? 'https://x/?').searchParams.get('forecast')).toBe('240');
     });
 
+    it('Clouds + Rain Global with the forecast: no Clouds tiles for k > 0, the preload at +24 asks for -12, Clouds return after the wrap', async () => {
+        const map = await begin(() => {
+            toggleLayer('clouds', true);
+            setRain('precip-global');
+            settings.playForecast = true;
+        });
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        for (let i = 0; i < 36; i++) {
+            await step(map);
+            const k = session.frame;
+            const c = buffers(map, 'clouds');
+            if (k > 0) {
+                // the slot is still in the stack, on its last URL, but not drawn and not preloading
+                expect(frameOf(c.visible)).toBeLessThanOrEqual(0);
+                expect(map.isDrawn('taknz-wx-clouds')).toBe(false);
+                // a leftover buffer from the last swap may wait to settle, but it is not drawn
+                if (k < 24) expect(map.isDrawn('taknz-wx-clouds-b')).toBe(false);
+                // Rain keeps playing
+                expect(new URL(buffers(map, 'precip-global').visible ?? 'https://x/?').searchParams.get('forecast')).toBe(String(k * 10));
+            } else {
+                expect(map.isDrawn('taknz-wx-clouds')).toBe(true);
+            }
+        }
+        expect(session.frame).toBe(24);
+        // at +24 the hidden Clouds buffer loads the first frame after the wrap
+        expect(frameOf(buffers(map, 'clouds').hidden)).toBe(-12);
+        expect(map.isDrawn('taknz-wx-clouds-b') || map.isDrawn('taknz-wx-clouds')).toBe(true);
+        expect(map.counters.moveLayer).toBe(0);
+        const adds = map.counters.addLayer;
+        await step(map, 1200);
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map, 'clouds').visible)).toBe(-12);
+        expect(map.counters.addLayer).toBe(adds);
+        expect(map.isDrawn('taknz-wx-clouds') || map.isDrawn('taknz-wx-clouds-b')).toBe(true);
+    });
     it('Play needs a layer', async () => {
         const map = await begin(() => undefined);
         togglePlay();

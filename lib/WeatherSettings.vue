@@ -209,7 +209,7 @@
                 data-test='about-timeline'
             >
                 <li>The slider covers the last 2 hours in 10-minute steps, then Now, then the Rain forecast.</li>
-                <li>Clouds and Radar hold their newest frame after Now. When a layer is behind the others, frames can repeat, and Now can be 10 to 20 minutes newer than that layer's data.</li>
+                <li>Clouds and Radar have no forecast; they are hidden in forecast frames. When a layer is behind the others, frames can repeat, and Now can be 10 to 20 minutes newer than that layer's data.</li>
             </ul>
         </section>
 

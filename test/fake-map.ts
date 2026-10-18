@@ -2,6 +2,7 @@ import type { MapLike, RasterLayerSpec, RasterSourceSpec, StyleLayerLike } from 
 
 export interface FakeLayer extends StyleLayerLike {
     paint?: Record<string, unknown>;
+    layout?: Record<string, unknown>;
 }
 
 interface FakeSource {
@@ -31,6 +32,8 @@ export class FakeMap implements MapLike {
     counters: Counters = this.zero();
     /** Every setPaintProperty call, in order. */
     paintLog: { layer: string; name: string; value: unknown }[] = [];
+    /** Every setLayoutProperty call, in order (not part of `counters`). */
+    layoutLog: { layer: string; name: string; value: unknown }[] = [];
     /** Every setTiles call, in order. */
     tilesLog: { source: string; tiles: string[] }[] = [];
     /** Source ids isSourceLoaded() reports as loaded once loading control is on. */
@@ -75,6 +78,7 @@ export class FakeMap implements MapLike {
     resetCounters(): void {
         this.counters = this.zero();
         this.paintLog = [];
+        this.layoutLog = [];
         this.tilesLog = [];
     }
 
@@ -167,6 +171,19 @@ export class FakeMap implements MapLike {
         this.counters.setPaintProperty++;
         this.paintLog.push({ layer: layerId, name, value });
         layer.paint = { ...layer.paint, [name]: value };
+    }
+
+    setLayoutProperty(layerId: string, name: string, value: unknown): void {
+        const layer = this.getLayer(layerId);
+        if (!layer) throw new Error(`Layer ${layerId} does not exist`);
+        this.layoutLog.push({ layer: layerId, name, value });
+        layer.layout = { ...layer.layout, [name]: value };
+    }
+
+    /** True when MapLibre would request tiles for the layer: it exists and is not `visibility: none`. */
+    isDrawn(layerId: string): boolean {
+        const layer = this.getLayer(layerId);
+        return Boolean(layer) && layer?.layout?.visibility !== 'none';
     }
 
     /** Drop every weather layer and source behind the stack's back (map re-init). */

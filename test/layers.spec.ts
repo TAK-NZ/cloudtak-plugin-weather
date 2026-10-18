@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     SLOT_ORDER, HIDDEN_OPACITY, SETTLE_RENDERS, layerId, sourceId, bufferLayerId, bufferSourceId, markerAnchor, planBeforeId, requestsFor, requestFor,
-    computeDesired, LayerStack,
+    computeDesired, noForecastAt, LayerStack,
     type DesiredLayer, type RasterLayerSpec, type RasterSourceSpec,
 } from '../lib/layers.ts';
 import { buildTileTemplate } from '../lib/relay-client.ts';
@@ -14,6 +14,7 @@ import { FakeMap } from './fake-map.ts';
 const SNAP = 1768434600;
 // "Now" is 5 minutes after the anchor, so the relay window is SNAP - 7200 .. SNAP.
 beforeEach(() => {
+    lastUrls = {};
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime((SNAP + 900) * 1000);
     clock.offsetMs = 0;
@@ -58,13 +59,17 @@ function selected(s: WeatherSettings): Set<LayerSlot> {
     return out;
 }
 
+/** The URLs on the map, like `act.applied` in index.ts: a slot without a forecast keeps its last URL. */
+let lastUrls: Partial<Record<LayerSlot, string>> = {};
 function urlsFor(s: WeatherSettings, sess: Sess): Partial<Record<LayerSlot, string>> {
     const reqs = requestsFor(s, sess);
     const out: Partial<Record<LayerSlot, string>> = {};
     for (const slot of SLOT_ORDER) {
         const r = reqs[slot];
         if (r) out[slot] = buildTileTemplate(ORIGIN, r, 'TOKEN');
+        else if (noForecastAt(slot, s, sess.frame) && lastUrls[slot] !== undefined) out[slot] = lastUrls[slot];
     }
+    lastUrls = { ...out };
     return out;
 }
 
@@ -86,7 +91,9 @@ function anchorOf(map: FakeMap): string | undefined {
 function assertInvariants(map: FakeMap, s: WeatherSettings, sess: Sess, foreignExpected: string[] = FOREIGN): void {
     const ids = map.layers.map((l) => l.id);
     const ours = ids.filter((id) => id.startsWith(ID_PREFIX));
-    const want = selected(s);
+    const urls = urlsFor(s, sess);
+    // a slot that was never shown before the forecast has no layer
+    const want = new Set([...selected(s)].filter((slot) => urls[slot] !== undefined));
 
     // I1: plugin layer set equals the selection
     expect(new Set(ours)).toEqual(new Set([...want].map(layerId)));
@@ -112,7 +119,6 @@ function assertInvariants(map: FakeMap, s: WeatherSettings, sess: Sess, foreignE
     expect(new Set(ourSources)).toEqual(new Set([...want].map(sourceId)));
 
     // I5: tile URLs equal the builder output
-    const urls = urlsFor(s, sess);
     for (const slot of want) {
         expect(map.getSource(sourceId(slot))?.tiles).toEqual([urls[slot]]);
     }
@@ -183,8 +189,8 @@ describe('requestsFor and computeDesired', () => {
         const r = requestsFor(s, { frame: 12, snapshot: SNAP });
         expect(r.precip?.query).toContainEqual(['forecast', '120']);
         expect(r['precip-global']?.query).toContainEqual(['forecast', '120']);
-        expect(r.clouds?.query.map(([k]) => k)).toEqual(['layer', 'snapshot']);
-        expect(r.radars?.query.map(([k]) => k)).not.toContain('forecast');
+        expect(r.clouds).toBeNull();
+        expect(r.radars).toBeNull();
     });
 
     it('sets maxzoom, tileSize and opacity per slot', () => {
@@ -208,6 +214,39 @@ describe('requestsFor and computeDesired', () => {
         expect(d[0].on).toBe(false);
     });
 
+    it('marks a selected Clouds or Radar slot without a forecast as hidden, only at k > 0 with Rain on', () => {
+        const s = defaultSettings();
+        s.clouds = true;
+        s.radars = true;
+        s.precipRegional = true;
+        const keep = { clouds: 'https://x/c', radars: 'https://x/r', precip: 'https://x/p' };
+        const at = (frame: number, urls: Partial<Record<LayerSlot, string>> = keep) => computeDesired(s, { frame, snapshot: SNAP }, urls);
+        for (const frame of [1, 3, 24]) {
+            expect(at(frame).map((d) => Boolean(d.hidden))).toEqual([true, false, false, true]);
+            // the last URL keeps the slot on the map, hidden
+            expect(at(frame).map((d) => d.on)).toEqual([true, false, true, true]);
+        }
+        for (const frame of [0, -1, -12]) expect(at(frame).some((d) => d.hidden)).toBe(false);
+        // never shown before: nothing to keep, the slot stays off
+        expect(at(3, { precip: 'https://x/p' }).map((d) => d.on)).toEqual([false, false, true, false]);
+        // a switched-off slot is not "hidden"
+        s.clouds = false;
+        expect(at(3)[0].hidden).toBeUndefined();
+        // without Rain the frame clamps to Now
+        s.precipRegional = false;
+        expect(at(3).some((d) => d.hidden)).toBe(false);
+    });
+    it('a hidden slot has nothing to wait for when the preload frame is a forecast frame too', () => {
+        const s = defaultSettings();
+        s.clouds = true;
+        s.precipRegional = true;
+        const urls = { clouds: 'https://x/c', precip: 'https://x/p' };
+        const pre = (key: number) => computeDesired(s, { frame: 3, snapshot: SNAP }, urls, { key, tiles: key > 0 ? { precip: 'https://x/p2' } : { precip: 'https://x/p2', clouds: 'https://x/c2' } });
+        expect(pre(4)[0]).toMatchObject({ hidden: true, preloadNone: 4 });
+        expect(pre(4)[0].preload).toBeUndefined();
+        expect(pre(-12)[0].preload).toEqual({ tiles: 'https://x/c2', key: -12 });
+        expect(pre(-12)[0].preloadNone).toBeUndefined();
+    });
     it('requestFor throws a RangeError for an invalid snapshot, computeDesired does not', () => {
         const s = defaultSettings();
         s.clouds = true;
@@ -238,12 +277,25 @@ describe('timeline requests', () => {
         expect(q(r.precip).forecast).toBe('0');
         expect(r.clouds?.query.map(([k]) => k)).toEqual(['layer', 'snapshot']);
     });
-    it('the forecast: Rain takes forecast minutes, clouds and radar hold the anchor', () => {
-        const r = requestsFor(all(), { frame: 3, snapshot: SNAP });
-        expect(q(r.precip)).toMatchObject({ snapshot: String(SNAP), forecast: '30' });
-        expect(q(r.clouds).snapshot).toBe(String(SNAP));
-        expect(q(r.radars).snapshot).toBe(String(SNAP));
-        expect(q(r.radars).forecast).toBeUndefined();
+    it('the forecast: Rain takes forecast minutes, clouds and radar have no request', () => {
+        for (const frame of [1, 3, 24]) {
+            const r = requestsFor(all(), { frame, snapshot: SNAP });
+            expect(q(r.precip)).toMatchObject({ snapshot: String(SNAP), forecast: String(frame * 10) });
+            expect(r.clouds).toBeNull();
+            expect(r.radars).toBeNull();
+        }
+        // Now and the past are unchanged
+        for (const frame of [0, -1, -12]) {
+            const r = requestsFor(all(), { frame, snapshot: SNAP });
+            expect(r.clouds).not.toBeNull();
+            expect(r.radars).not.toBeNull();
+        }
+    });
+    it('an explicit forecast frame gives no clouds or radar request, a past frame does', () => {
+        expect(requestFor('clouds', all(), { frame: 0, snapshot: SNAP }, 5)).toBeNull();
+        expect(requestFor('radars', all(), { frame: 0, snapshot: SNAP }, 5)).toBeNull();
+        expect(q(requestFor('clouds', all(), { frame: 24, snapshot: SNAP }, -12)).snapshot).toBe(String(SNAP - 7200));
+        expect(q(requestFor('radars', all(), { frame: 24, snapshot: SNAP }, -12)).snapshot).toBe(String(SNAP - 7200));
     });
     it('Rain forecasts from its own latest snapshot', () => {
         const sess = { frame: 6, snapshot: SNAP, latest: { precip: SNAP - 600, clouds: SNAP - 1200, radars: SNAP } };
@@ -267,7 +319,7 @@ describe('timeline requests', () => {
         expect(q(r.radars).snapshot).toBe(String(SNAP));
         expect(q(r.precip).snapshot).toBe(String(SNAP));
         expect(q(requestFor('clouds', all(), { ...sess, frame: -1 })).snapshot).toBe(String(SNAP - 600));
-        expect(q(requestFor('clouds', all(), { ...sess, frame: 3 })).snapshot).toBe(String(SNAP));
+        expect(requestFor('clouds', all(), { ...sess, frame: 3 })).toBeNull();
     });
     it('the lower guard keeps -120 min inside the relay window while the anchor lags the clock', () => {
         vi.setSystemTime((SNAP + 1200 + 20) * 1000);
@@ -775,7 +827,8 @@ interface Frames {
     pre: number | null;
 }
 
-function urlsAt(s: WeatherSettings, sess: Sess, frame: number): Partial<Record<LayerSlot, string>> {
+/** The relay URL of each slot that has a request at `frame`. */
+function preUrlsAt(s: WeatherSettings, sess: Sess, frame: number): Partial<Record<LayerSlot, string>> {
     const reqs = requestsFor(s, sess, frame);
     const out: Partial<Record<LayerSlot, string>> = {};
     for (const slot of SLOT_ORDER) {
@@ -785,9 +838,19 @@ function urlsAt(s: WeatherSettings, sess: Sess, frame: number): Partial<Record<L
     return out;
 }
 
+/** The URLs of the shown frame, like `act.applied` in index.ts: a slot without a forecast keeps its last URL. */
+function urlsAt(s: WeatherSettings, sess: Sess, frame: number): Partial<Record<LayerSlot, string>> {
+    const out = preUrlsAt(s, sess, frame);
+    for (const slot of SLOT_ORDER) {
+        if (out[slot] === undefined && noForecastAt(slot, s, frame) && lastUrls[slot] !== undefined) out[slot] = lastUrls[slot];
+    }
+    lastUrls = { ...out };
+    return out;
+}
+
 function desiredAt(s: WeatherSettings, sess: Sess, fr: Frames): DesiredLayer[] {
     const shown = { ...sess, frame: fr.f };
-    return computeDesired(s, shown, urlsAt(s, shown, fr.f), fr.pre === null ? undefined : { key: fr.pre, tiles: urlsAt(s, shown, fr.pre) });
+    return computeDesired(s, shown, urlsAt(s, shown, fr.f), fr.pre === null ? undefined : { key: fr.pre, tiles: preUrlsAt(s, shown, fr.pre) });
 }
 
 /** Let MapLibre render long enough for a swap to settle. */
@@ -809,10 +872,10 @@ function syncAt(stack: LayerStack, s: WeatherSettings, sess: Sess, fr: Frames): 
 /** Invariants I1-I9 for a stack with buffers. */
 function assertBuffers(map: FakeMap, s: WeatherSettings, sess: Sess, fr: Frames, foreignExpected: string[] = FOREIGN): void {
     const ids = map.layers.map((l) => l.id);
-    const want = selected(s);
     const shown = { ...sess, frame: fr.f };
     const urls = urlsAt(s, shown, fr.f);
-    const preUrls = fr.pre === null ? {} : urlsAt(s, shown, fr.pre);
+    const want = new Set([...selected(s)].filter((slot) => urls[slot] !== undefined));
+    const preUrls = fr.pre === null ? {} : preUrlsAt(s, shown, fr.pre);
 
     // I2: flattened order clouds < global < regional < radars with a below b, and nothing unknown
     const flat: string[] = [];
@@ -845,12 +908,17 @@ function assertBuffers(map: FakeMap, s: WeatherSettings, sess: Sess, fr: Frames,
 
         // I5: the visible buffer shows the frame, the hidden one the preload (and only when it differs)
         expect(map.getSource(bufferSourceId(slot, visible[0]))?.tiles).toEqual([urls[slot]]);
-        if (fr.pre !== null && preUrls[slot] !== urls[slot]) {
+        // (a layout-hidden slot is not loading its shown buffer, so an equal URL loads in the other buffer too)
+        if (fr.pre !== null && preUrls[slot] !== undefined && (preUrls[slot] !== urls[slot] || noForecastAt(slot, s, fr.f))) {
             expect(hidden.length).toBe(1);
             expect(map.getSource(bufferSourceId(slot, hidden[0]))?.tiles).toEqual([preUrls[slot]]);
+            // the preloading buffer is drawn (opacity 0) so MapLibre loads it
+            expect(map.isDrawn(bufferLayerId(slot, hidden[0]))).toBe(true);
         } else {
             expect(hidden.length).toBe(0);
         }
+        // a slot without a forecast at the shown frame is layout-hidden: no tile requests
+        expect(map.isDrawn(bufferLayerId(slot, visible[0]))).toBe(!noForecastAt(slot, s, fr.f));
 
         for (const b of present) {
             expect(map.getLayer(bufferLayerId(slot, b))?.source).toBe(bufferSourceId(slot, b));
@@ -1146,6 +1214,85 @@ describe('Case I: double buffering', () => {
         expect(map.getLayer('taknz-wx-clouds-b')).toBeUndefined();
         expect(map.getLayer('taknz-wx-radars-b')).toBeUndefined();
         expect(map.getLayer('taknz-wx-precip-b')).toBeDefined();
+    });
+
+    it('stacking matrix: 16 subsets x frames -12, 0, +3, +24 keep the order, hide Clouds and Radar after Now and never move a layer', () => {
+        const sequence = [-12, 0, 3, 24, 3, 0, -12, 24, -12];
+        let checked = 0;
+        for (let mask = 1; mask < 16; mask++) {
+            const { map, stack, s, sess } = freshBuf();
+            s.clouds = Boolean(mask & 1);
+            s.precipGlobal = Boolean(mask & 2);
+            s.precipRegional = Boolean(mask & 4);
+            s.radars = Boolean(mask & 8);
+            const rain = s.precipGlobal || s.precipRegional;
+            for (const [i, f] of sequence.entries()) {
+                if (f > 0 && !rain) continue;
+                const next = sequence[(i + 1) % sequence.length];
+                const fr: Frames = { f, pre: next > 0 && !rain ? null : next };
+                const d = desiredAt(s, sess, fr);
+                // desired layers at k > 0: Clouds and Radar are never drawn
+                for (const x of d) {
+                    if (x.slot === 'clouds' || x.slot === 'radars') expect(Boolean(x.hidden)).toBe(f > 0 && selected(s).has(x.slot));
+                    else expect(x.hidden).toBeUndefined();
+                }
+                syncAt(stack, s, sess, fr);
+                assertBuffers(map, s, sess, fr);
+                const main = [...new Set(map.layers.map((l) => l.id).filter((id) => id.startsWith(ID_PREFIX)).map((id) => id.replace(/-b$/, '')))];
+                expect(main).toEqual(SLOT_ORDER.filter((slot) => selected(s).has(slot)).map(layerId));
+                for (const slot of ['clouds', 'radars'] as const) {
+                    if (!selected(s).has(slot)) continue;
+                    const drawn = BUFS.some((b) => map.isDrawn(bufferLayerId(slot, b)) && map.getLayer(bufferLayerId(slot, b))?.paint?.['raster-opacity'] !== HIDDEN_OPACITY);
+                    expect(drawn).toBe(f <= 0);
+                }
+                checked++;
+            }
+            expect(map.counters.moveLayer).toBe(0);
+        }
+        expect(checked).toBeGreaterThan(100);
+    });
+
+    it('Play through the forecast: Clouds and Radar are layout-hidden with no buffer, then return in place at the wrap', () => {
+        const { map, stack, s, sess } = freshBuf();
+        s.clouds = true;
+        s.radars = true;
+        s.precipRegional = true;
+        const order = ['taknz-wx-clouds', 'taknz-wx-precip', 'taknz-wx-radars'];
+        const mains = (): string[] => map.layers.map((l) => l.id).filter((id) => id.startsWith(ID_PREFIX) && !id.endsWith('-b'));
+        for (let f = -12; f <= 23; f++) {
+            const fr: Frames = { f, pre: f + 1 };
+            syncAt(stack, s, sess, fr);
+            assertBuffers(map, s, sess, fr);
+            expect(mains()).toEqual(order);
+            // not drawn in any forecast frame, drawn again up to Now
+            for (const id of ['taknz-wx-clouds', 'taknz-wx-radars']) expect(map.isDrawn(id)).toBe(f <= 0);
+            // the frame and the next one are both forecast frames: no buffer, nothing to load
+            if (f > 0) {
+                expect(map.getLayer('taknz-wx-clouds-b')).toBeUndefined();
+                expect(map.getLayer('taknz-wx-radars-b')).toBeUndefined();
+            }
+        }
+        expect(map.counters.moveLayer).toBe(0);
+
+        // at +24 the next frame is -12: Clouds and Radar preload it (drawn at opacity 0)
+        const last: Frames = { f: 24, pre: -12 };
+        syncAt(stack, s, sess, last);
+        assertBuffers(map, s, sess, last);
+        for (const id of ['taknz-wx-clouds', 'taknz-wx-radars']) {
+            expect(map.isDrawn(id)).toBe(false);
+            expect(map.isDrawn(`${id}-b`)).toBe(true);
+            expect(map.getLayer(`${id}-b`)?.paint?.['raster-opacity']).toBe(HIDDEN_OPACITY);
+        }
+
+        // the wrap: they return on the preloaded buffer, no new layer, no move, same order
+        map.resetCounters();
+        const wrap: Frames = { f: -12, pre: -11 };
+        syncAt(stack, s, sess, wrap);
+        assertBuffers(map, s, sess, wrap);
+        expect(map.counters.addLayer).toBe(0);
+        expect(map.counters.moveLayer).toBe(0);
+        expect(mains()).toEqual(order);
+        for (const id of ['taknz-wx-clouds', 'taknz-wx-radars']) expect(map.isDrawn(id) || map.isDrawn(`${id}-b`)).toBe(true);
     });
 });
 

@@ -84,6 +84,7 @@ export interface MapLike {
     removeSource(id: string): unknown;
     moveLayer(id: string, beforeId?: string): unknown;
     setPaintProperty(layerId: string, name: string, value: unknown): unknown;
+    setLayoutProperty(layerId: string, name: string, value: unknown): unknown;
     isSourceLoaded?(id: string): boolean;
 }
 
@@ -94,8 +95,16 @@ export interface DesiredLayer {
     opacity: number;
     tileSize: 256 | 512;
     maxzoom: number;
+    /**
+     * Selected, but it has no forecast and the shown frame is one: the layers stay in the
+     * stack with layout `visibility: none` (so MapLibre requests no tiles) and the slot
+     * comes back in place when a frame with data is shown.
+     */
+    hidden?: boolean;
     /** The frame to load into the hidden buffer. `key` identifies the frame. */
     preload?: { tiles: string; key: number };
+    /** The preload frame has no request for this slot (a forecast frame); there is nothing to wait for. */
+    preloadNone?: number;
 }
 
 const ours = (id: string): boolean => id.startsWith(ID_PREFIX);
@@ -135,9 +144,16 @@ export function isSelected(slot: LayerSlot, settings: WeatherSettings): boolean 
 
 type TimelineSession = Pick<Session, 'frame' | 'snapshot'> & Partial<Pick<Session, 'latest'>>;
 
+/** Clouds and Radar have no forecast: they are not drawn, and not requested, in forecast frames. */
+export function noForecastAt(slot: LayerSlot, settings: WeatherSettings, frame: number): boolean {
+    if (slot !== 'clouds' && slot !== 'radars') return false;
+    return isSelected(slot, settings) && clampFrame(frame, frameBounds(rainOn(settings)).max) > 0;
+}
+
 /**
- * The relay request for one slot, or null when it is switched off. `frame` defaults to
- * the committed frame and is clamped to what the settings allow (no Rain: no forecast).
+ * The relay request for one slot, or null when it is switched off, or when it has no
+ * data at that frame (Clouds and Radar in the forecast, k > 0). `frame` defaults to the
+ * committed frame and is clamped to what the settings allow (no Rain: no forecast).
  * Throws a RangeError when the settings do not make a valid request.
  */
 export function requestFor(
@@ -150,7 +166,7 @@ export function requestFor(
     const nowMs = clock.now();
     const k = clampFrame(frame, frameBounds(rainOn(settings)).max);
 
-    if (slot === 'clouds') return settings.clouds ? tileRequest('clouds', { snapshot: holdSnapshot(k, anchor, nowMs) }) : null;
+    if (slot === 'clouds') return settings.clouds && k <= 0 ? tileRequest('clouds', { snapshot: holdSnapshot(k, anchor, nowMs) }) : null;
     if (slot === 'precip' || slot === 'precip-global') {
         if (!isSelected(slot, settings)) return null;
         const rain = rainFrame(k, anchor, session.latest?.[slot], nowMs);
@@ -161,7 +177,7 @@ export function requestFor(
             coverage: settings.coverage,
         });
     }
-    if (!settings.radars) return null;
+    if (!settings.radars || k > 0) return null;
     return tileRequest('radars', {
         color: settings.palette.radars,
         snapshot: holdSnapshot(k, anchor, nowMs),
@@ -172,7 +188,7 @@ export function requestFor(
 
 /**
  * The relay request for each slot that is switched on (null = off).
- * Only Rain carries the forecast; clouds and radar hold their newest frame after Now.
+ * Only Rain carries the forecast; clouds and radar have no request in forecast frames.
  */
 export function requestsFor(settings: WeatherSettings, session: TimelineSession, frame: number = session.frame): Record<LayerSlot, TileRequest | null> {
     return {
@@ -190,7 +206,9 @@ export interface PreloadUrls {
 }
 
 /**
- * One entry per slot. A slot is on when it is selected and has a tile URL.
+ * One entry per slot. A slot is on when it is selected and has a tile URL. A selected slot
+ * without a forecast at the shown frame is `hidden`; the caller passes its last URL, so the
+ * layers stay in the stack (and in order), or none when it has never been shown.
  */
 export function computeDesired(
     settings: WeatherSettings,
@@ -209,13 +227,17 @@ export function computeDesired(
             tileSize: settings.tileSize,
             maxzoom: MAX_ZOOM[slot],
         };
+        if (noForecastAt(slot, settings, session.frame)) d.hidden = true;
         if (preload && typeof next === 'string' && next !== '') d.preload = { tiles: next, key: preload.key };
+        else if (preload && noForecastAt(slot, settings, preload.key)) d.preloadNone = preload.key;
         return d;
     });
 }
 
 interface BufferState {
     tiles: string;
+    /** Layout visibility on the map (false = `none`). */
+    shown: boolean;
 }
 
 interface Applied {
@@ -227,7 +249,9 @@ interface Applied {
     tileSize: number;
     maxzoom: number;
     /** The frame the preload serves, and where it loads: the hidden buffer, or the visible one when the URLs are equal. */
-    pre: { key: number; via: 'visible' | 'hidden' } | null;
+    pre: { key: number; via: 'visible' | 'hidden' | 'none' } | null;
+    /** The slot has no forecast at the shown frame; its layers are layout-hidden. */
+    hidden: boolean;
     /** The render count at the last swap (null = never swapped). */
     swappedAt: number | null;
     /** The hidden buffer is no longer needed and goes once the swap has settled. */
@@ -324,11 +348,12 @@ export class LayerStack {
         this.create(d, 0, d.tiles, d.opacity, before);
         this.applied.set(d.slot, {
             visible: 0,
-            bufs: [{ tiles: d.tiles }, null],
+            bufs: [{ tiles: d.tiles, shown: true }, null],
             opacity: d.opacity,
             tileSize: d.tileSize,
             maxzoom: d.maxzoom,
             pre: null,
+            hidden: false,
             swappedAt: null,
             dropHidden: false,
         });
@@ -371,7 +396,7 @@ export class LayerStack {
             ? planBeforeId(d.slot, this.presentSlots(d.slot), markerAnchor(this.map.getStyle()), (s) => this.lowestLayerId(s) as string)
             : bufferLayerId(d.slot, 1);
         this.create(d, hidden, tiles, HIDDEN_OPACITY, before);
-        a.bufs[hidden] = { tiles };
+        a.bufs[hidden] = { tiles, shown: true };
     }
 
     /** Load (or stop loading) the next frame into the hidden buffer. */
@@ -384,11 +409,12 @@ export class LayerStack {
         try {
             if (!pre) {
                 this.dropHidden(d.slot, a);
-                a.pre = null;
+                a.pre = d.preloadNone === undefined ? null : { key: d.preloadNone, via: 'none' };
                 return;
             }
 
-            if (pre.tiles === a.bufs[a.visible]?.tiles) {
+            // A hidden slot's shown buffer is not loading, so the frame has to load in the other one.
+            if (pre.tiles === a.bufs[a.visible]?.tiles && !d.hidden) {
                 // Nothing new to load, the shown frame already is that frame.
                 this.dropHidden(d.slot, a);
                 a.pre = { key: pre.key, via: 'visible' };
@@ -439,6 +465,87 @@ export class LayerStack {
         a.pre = null;
     }
 
+    /** Set the layout visibility of one buffer, only when it differs from what is on the map. */
+    private setShown(slot: LayerSlot, buf: Buf, a: Applied, shown: boolean): void {
+        const b = a.bufs[buf];
+        if (!b || b.shown === shown) return;
+        if (!this.map.getLayer(bufferLayerId(slot, buf))) return;
+        this.map.setLayoutProperty(bufferLayerId(slot, buf), 'visibility', shown ? 'visible' : 'none');
+        b.shown = shown;
+    }
+
+    /**
+     * Layout visibility. A hidden slot (no forecast at the shown frame) keeps its layers,
+     * so the order stays, but with `visibility: none` MapLibre requests no tiles for them.
+     * The other buffer is visible (at opacity 0) only while it loads a frame.
+     */
+    private applyLayout(d: DesiredLayer): void {
+        const a = this.applied.get(d.slot);
+        if (!a) return;
+        const hidden = (1 - a.visible) as Buf;
+        this.setShown(d.slot, a.visible, a, !d.hidden);
+        if (a.pre?.via === 'hidden') this.setShown(d.slot, hidden, a, true);
+        else if (d.hidden) this.setShown(d.slot, hidden, a, false);
+        a.hidden = Boolean(d.hidden);
+    }
+
+    private syncSlot(slot: LayerSlot, d: DesiredLayer): void {
+        const prev = this.applied.get(slot);
+        const exists = Boolean(prev && this.map.getLayer(bufferLayerId(slot, prev.visible)));
+
+        if (!exists || !prev) {
+            if (this.lowestLayerId(slot) !== undefined) this.remove(slot);
+            this.add(d);
+            this.syncPreload(d);
+            return;
+        }
+
+        if (prev.tileSize !== d.tileSize || prev.maxzoom !== d.maxzoom) {
+            this.remove(slot);
+            this.add(d);
+            this.syncPreload(d);
+            return;
+        }
+
+        this.repairHidden(slot, prev);
+
+        const shown = prev.bufs[prev.visible];
+        if (shown) {
+            const hidden = prev.bufs[(1 - prev.visible) as Buf];
+            // The slot returns from a forecast frame: the buffer that preloaded its frame takes over.
+            const returning = prev.hidden && !d.hidden;
+            if (hidden && hidden.tiles === d.tiles && (shown.tiles !== d.tiles || returning)) {
+                try {
+                    this.swap(slot, prev, d.opacity);
+                } catch (err) {
+                    console.warn('[weather] Could not swap the preloaded frame, reloading it', err);
+                    this.remove(slot);
+                    this.add(d);
+                    this.syncPreload(d);
+                    return;
+                }
+            } else if (shown.tiles !== d.tiles) {
+                const src = this.map.getSource(bufferSourceId(slot, prev.visible)) as { setTiles?: (tiles: string[]) => unknown } | undefined;
+                if (src && typeof src.setTiles === 'function') {
+                    src.setTiles([d.tiles]);
+                    shown.tiles = d.tiles;
+                } else {
+                    this.remove(slot);
+                    this.add(d);
+                    this.syncPreload(d);
+                    return;
+                }
+            }
+        }
+
+        if (prev.opacity !== d.opacity) {
+            this.map.setPaintProperty(bufferLayerId(slot, prev.visible), 'raster-opacity', d.opacity);
+            prev.opacity = d.opacity;
+        }
+
+        this.syncPreload(d);
+    }
+
     sync(desired: DesiredLayer[]): void {
         const bySlot = new Map(desired.map((d) => [d.slot, d]));
 
@@ -450,59 +557,8 @@ export class LayerStack {
         for (const slot of SLOT_ORDER) {
             const d = bySlot.get(slot);
             if (!d || !d.on) continue;
-
-            const prev = this.applied.get(slot);
-            const exists = Boolean(prev && this.map.getLayer(bufferLayerId(slot, prev.visible)));
-
-            if (!exists || !prev) {
-                if (this.lowestLayerId(slot) !== undefined) this.remove(slot);
-                this.add(d);
-                this.syncPreload(d);
-                continue;
-            }
-
-            if (prev.tileSize !== d.tileSize || prev.maxzoom !== d.maxzoom) {
-                this.remove(slot);
-                this.add(d);
-                this.syncPreload(d);
-                continue;
-            }
-
-            this.repairHidden(slot, prev);
-
-            const shown = prev.bufs[prev.visible];
-            if (shown && shown.tiles !== d.tiles) {
-                const hidden = prev.bufs[(1 - prev.visible) as Buf];
-                if (hidden && hidden.tiles === d.tiles) {
-                    try {
-                        this.swap(slot, prev, d.opacity);
-                    } catch (err) {
-                        console.warn('[weather] Could not swap the preloaded frame, reloading it', err);
-                        this.remove(slot);
-                        this.add(d);
-                        this.syncPreload(d);
-                        continue;
-                    }
-                } else {
-                    const src = this.map.getSource(bufferSourceId(slot, prev.visible)) as { setTiles?: (tiles: string[]) => unknown } | undefined;
-                    if (src && typeof src.setTiles === 'function') {
-                        src.setTiles([d.tiles]);
-                        shown.tiles = d.tiles;
-                    } else {
-                        this.remove(slot);
-                        this.add(d);
-                        this.syncPreload(d);
-                        continue;
-                    }
-                }
-            }
-
-            if (prev.opacity !== d.opacity) {
-                this.map.setPaintProperty(bufferLayerId(slot, prev.visible), 'raster-opacity', d.opacity);
-                prev.opacity = d.opacity;
-            }
-
-            this.syncPreload(d);
+            this.syncSlot(slot, d);
+            this.applyLayout(d);
         }
 
         this.ensureOrder();
