@@ -43,47 +43,59 @@
             <h3 class='card-title m-0'>
                 Colour palette
             </h3>
-            <div class='d-flex align-items-center gap-2'>
-                <label
-                    class='form-label m-0'
-                    style='width: 5rem;'
-                    :for='`${id}-palette-precip`'
-                >Rain</label>
-                <select
-                    :id='`${id}-palette-precip`'
-                    class='form-select'
-                    data-test='palette-precip'
-                    :value='settings.palette.precip'
-                    @change='onPalette("precip", $event)'
-                >
-                    <option
-                        v-for='code in PALETTES'
-                        :key='code'
-                        :value='code'
-                        v-text='`Palette ${code}`'
-                    />
-                </select>
+            <div class='d-flex flex-column gap-1'>
+                <div class='d-flex align-items-center gap-2'>
+                    <label
+                        class='form-label m-0'
+                        style='width: 5rem;'
+                        :for='`${id}-palette-precip`'
+                    >Rain</label>
+                    <select
+                        :id='`${id}-palette-precip`'
+                        class='form-select'
+                        data-test='palette-precip'
+                        :value='settings.palette.precip'
+                        @change='onPalette("precip", $event)'
+                    >
+                        <option
+                            v-for='code in PALETTES'
+                            :key='code'
+                            :value='code'
+                            v-text='PALETTE_NAMES[code]'
+                        />
+                    </select>
+                </div>
+                <PaletteLegend
+                    :palette='settings.palette.precip'
+                    :snow='true'
+                />
             </div>
-            <div class='d-flex align-items-center gap-2'>
-                <label
-                    class='form-label m-0'
-                    style='width: 5rem;'
-                    :for='`${id}-palette-radars`'
-                >Radar</label>
-                <select
-                    :id='`${id}-palette-radars`'
-                    class='form-select'
-                    data-test='palette-radars'
-                    :value='settings.palette.radars'
-                    @change='onPalette("radars", $event)'
-                >
-                    <option
-                        v-for='code in PALETTES'
-                        :key='code'
-                        :value='code'
-                        v-text='`Palette ${code}`'
-                    />
-                </select>
+            <div class='d-flex flex-column gap-1'>
+                <div class='d-flex align-items-center gap-2'>
+                    <label
+                        class='form-label m-0'
+                        style='width: 5rem;'
+                        :for='`${id}-palette-radars`'
+                    >Radar</label>
+                    <select
+                        :id='`${id}-palette-radars`'
+                        class='form-select'
+                        data-test='palette-radars'
+                        :value='settings.palette.radars'
+                        @change='onPalette("radars", $event)'
+                    >
+                        <option
+                            v-for='code in PALETTES'
+                            :key='code'
+                            :value='code'
+                            v-text='PALETTE_NAMES[code]'
+                        />
+                    </select>
+                </div>
+                <PaletteLegend
+                    :palette='settings.palette.radars'
+                    :snow='settings.radarsPrecipType'
+                />
             </div>
         </section>
 
@@ -109,7 +121,13 @@
                     :checked='settings.radarsPrecipType'
                     @change='setRadarsPrecipType(checked($event))'
                 >
-                <span class='form-check-label'>Show precipitation type on radar</span>
+                <span class='form-check-label'>
+                    Show snow separately on radar
+                    <span
+                        class='d-block text-secondary small'
+                        data-test='precip-type-hint'
+                    >When off, all radar precipitation is drawn as rain. Rain layers always show snow.</span>
+                </span>
             </label>
             <label class='form-check m-0'>
                 <input
@@ -194,7 +212,7 @@
                 class='small text-secondary m-0 ps-3 d-flex flex-column gap-1'
                 data-test='about-layers'
             >
-                <li>Rain is precipitation derived from radar. Rain Regional covers New Zealand and the nearby Pacific in more detail; Rain Global covers the world. Both can be on at the same time. Only Rain has a forecast, up to 4 hours ahead.</li>
+                <li>Rain Regional shows precipitation and its forecast wherever weather radar coverage exists. Rain Global covers the whole world. Both can be on at the same time. Only Rain has a forecast, up to 4 hours ahead.</li>
                 <li>Radar shows observed radar echoes.</li>
                 <li>Clouds shows satellite cloud cover.</li>
             </ul>
@@ -243,6 +261,8 @@
 import { useId } from 'vue';
 import type { LayerSlot, PaletteCode, TimeZoneSetting } from './types.ts';
 import { PALETTES } from './constants.ts';
+import { PALETTE_NAMES } from './palette-stops.ts';
+import PaletteLegend from './PaletteLegend.vue';
 import {
     resetSettings,
     setCoverage,

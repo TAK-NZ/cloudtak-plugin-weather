@@ -14,6 +14,7 @@ import { bindStorage, session, setFrame, setPlaying, settings, toggleLayer, setT
 import { Player, bindPlayer } from '../lib/player.ts';
 import { ROUTE_NAME } from '../lib/constants.ts';
 import type { HealthState } from '../lib/types.ts';
+import { RAIN_STOPS } from '../lib/palette-stops.ts';
 import { setRain } from './helpers.ts';
 
 // 2026-01-15T00:00:00Z, a Thursday.
@@ -477,15 +478,62 @@ describe('TimelineSlider', () => {
 });
 
 describe('WeatherSettings', () => {
-    it('shows Palette 4 selected for Rain and Radar on fresh settings', () => {
+    it('shows Nexrad selected for Rain and Radar on fresh settings, with palette names as the options', () => {
         wrapper = mount(WeatherSettings);
         for (const slot of ['precip', 'radars']) {
             const select = wrapper.get(`[data-test=palette-${slot}]`).element as HTMLSelectElement;
             expect(select.value).toBe('4');
-            expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Palette 4');
+            expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Nexrad');
+            expect([...select.options].map((o) => [o.value, o.textContent?.trim()])).toEqual([
+                ['0', 'Rainbow'], ['1', 'TWC'], ['2', 'Dark Sky'], ['3', 'Meteored'], ['4', 'Nexrad'],
+                ['5', 'Rainviewer'], ['6', 'Selex'], ['7', 'Titan'], ['8', 'Universal Blue'], ['9', 'TWC RV'],
+            ]);
         }
     });
-
+    it('shows a Rain and a Snow strip under the Rain palette, and a Rain strip under the Radar palette until the snow option is on', async () => {
+        wrapper = mount(WeatherSettings);
+        const legends = wrapper.findAll('[data-test=palette-legend]');
+        expect(legends).toHaveLength(2);
+        const [rain, radar] = legends as [typeof legends[number], typeof legends[number]];
+        expect(rain.findAll('[data-test^=legend-]').map((e) => e.attributes('data-test'))).toEqual(['legend-rain', 'legend-snow']);
+        expect(radar.findAll('[data-test^=legend-]').map((e) => e.attributes('data-test'))).toEqual(['legend-rain']);
+        for (const legend of legends) {
+            for (const strip of legend.findAll('[data-test^=legend-]')) expect(strip.attributes('aria-hidden')).toBe('true');
+            expect(legend.text()).toContain('Light');
+            expect(legend.text()).toContain('Heavy');
+        }
+        expect(radar.text()).not.toContain('Snow');
+        await wrapper.get('[data-test=precip-type]').setValue(true);
+        expect(radar.findAll('[data-test^=legend-]').map((e) => e.attributes('data-test'))).toEqual(['legend-rain', 'legend-snow']);
+        expect(radar.text()).toContain('Snow');
+        await wrapper.get('[data-test=precip-type]').setValue(false);
+        expect(radar.findAll('[data-test^=legend-]')).toHaveLength(1);
+    });
+    it('follows the palette chosen for each layer', async () => {
+        wrapper = mount(WeatherSettings);
+        const select = wrapper.get('[data-test=palette-radars]');
+        await select.setValue('0');
+        expect(settings.palette.radars).toBe('0');
+        expect(settings.palette.precip).toBe('4');
+        const [rain, radar] = wrapper.findAll('[data-test=palette-legend]');
+        // jsdom writes colours as rgb()
+        const rgb = (hex: string): string => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
+        expect(radar?.get('[data-test=legend-rain]').attributes('style')).toContain(rgb(RAIN_STOPS['0'][0] as string));
+        expect(rain?.get('[data-test=legend-rain]').attributes('style')).toContain(rgb(RAIN_STOPS['4'][0] as string));
+    });
+    it('labels the radar snow option and explains it', () => {
+        wrapper = mount(WeatherSettings);
+        const box = wrapper.get('[data-test=precip-type]').element.closest('label');
+        expect(box?.textContent).toContain('Show snow separately on radar');
+        expect(wrapper.get('[data-test=precip-type-hint]').text()).toBe('When off, all radar precipitation is drawn as rain. Rain layers always show snow.');
+        expect(wrapper.text()).not.toContain('Show precipitation type on radar');
+    });
+    it('says where Rain Regional and Rain Global are available', () => {
+        wrapper = mount(WeatherSettings);
+        const first = wrapper.get('[data-test=about-layers] li');
+        expect(first.text()).toBe('Rain Regional shows precipitation and its forecast wherever weather radar coverage exists. Rain Global covers the whole world. Both can be on at the same time. Only Rain has a forecast, up to 4 hours ahead.');
+        for (const old of ['derived from radar', 'New Zealand and the nearby Pacific', 'Palette 4']) expect(wrapper.text()).not.toContain(old);
+    });
     it('has an opacity slider per layer, including Rain Global, and one shared Rain palette', async () => {
         wrapper = mount(WeatherSettings);
         for (const slot of ['clouds', 'precip-global', 'precip', 'radars']) {
@@ -496,7 +544,7 @@ describe('WeatherSettings', () => {
         await global.trigger('input');
         expect(settings.opacity['precip-global']).toBe(0.4);
         expect(settings.opacity.precip).toBe(0.7);
-        expect(wrapper.findAll('[data-test^=palette-]').map((e) => e.attributes('data-test'))).toEqual(['palette-precip', 'palette-radars']);
+        expect(wrapper.findAll('select[data-test^=palette-]').map((e) => e.attributes('data-test'))).toEqual(['palette-precip', 'palette-radars']);
         expect(wrapper.find('input[type=radio][data-test^=rain]').exists()).toBe(false);
     });
 
