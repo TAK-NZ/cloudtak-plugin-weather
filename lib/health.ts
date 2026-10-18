@@ -15,6 +15,16 @@ export function healthMessage(s: HealthState): string {
     }
 }
 
+/** Short text for the status icon of the panel ('' when ok). */
+export function healthShort(s: HealthState): string {
+    switch (s.kind) {
+        case 'ok': return '';
+        case 'limited': return 'Rate limited, retrying';
+        case 'denied': return s.status === 401 ? 'Session expired' : 'Disabled by admin';
+        case 'degraded': return 'Weather unavailable';
+    }
+}
+
 /** What the caller should do in response to a map error. */
 export type HealthAction = 'none' | 'refresh-token' | 'refetch-status';
 

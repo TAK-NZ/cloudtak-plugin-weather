@@ -7,14 +7,13 @@ const routerMock = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock('vue-router', () => ({ useRouter: () => routerMock }));
 
 import LayerControls from '../lib/LayerControls.vue';
-import ForecastSlider from '../lib/ForecastSlider.vue';
+import TimelineSlider from '../lib/TimelineSlider.vue';
 import WeatherBar from '../lib/WeatherBar.vue';
 import WeatherSettings from '../lib/WeatherSettings.vue';
-import { WeatherControl } from '../lib/control.ts';
-import { bindStorage, session, setFrame, setPrecip, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
-import { CONTROL_CLASS, ROUTE_NAME } from '../lib/constants.ts';
+import { bindStorage, session, setFrame, settings, toggleLayer, setTimeZone } from '../lib/state.ts';
+import { ROUTE_NAME } from '../lib/constants.ts';
 import type { HealthState } from '../lib/types.ts';
-import { EventedFakeMap } from './helpers.ts';
+import { setRain } from './helpers.ts';
 
 // 2026-01-15T00:00:00Z, a Thursday.
 const SNAPSHOT = 1768435200;
@@ -59,45 +58,55 @@ describe('LayerControls', () => {
         expect(clouds.attributes('aria-pressed')).toBe('false');
     });
 
-    it('offers Off, Regional and Global as one exclusive radiogroup', async () => {
+    it('offers Clouds, Rain Regional, Rain Global and Radar as four independent toggles', async () => {
         wrapper = mount(LayerControls, { attachTo: document.body });
-        expect(wrapper.find('[role=radiogroup]').exists()).toBe(true);
+        const chips = wrapper.findAll('[data-test^=toggle-]').map((c) => c.attributes('data-test'));
+        expect(chips).toEqual(['toggle-clouds', 'toggle-precip', 'toggle-precip-global', 'toggle-radars']);
+        expect(wrapper.findAll('[data-test^=toggle-]').map((c) => c.text())).toEqual(['Clouds', 'Rain Regional', 'Rain Global', 'Radar']);
+        expect(wrapper.find('[role=radiogroup]').exists()).toBe(false);
+        expect(wrapper.find('input[type=radio]').exists()).toBe(false);
 
-        const radio = (v: string): HTMLInputElement => wrapper!.get(`[data-test="rain-${v}"]`).element as HTMLInputElement;
-        const names = new Set(['none', 'precip', 'precip-global'].map((v) => radio(v).name));
-        expect(names.size).toBe(1);
-        expect(radio('none').checked).toBe(true);
-
-        await wrapper.get('[data-test="rain-precip"]').setValue(true);
-        expect(settings.precip).toBe('precip');
-        expect([radio('none').checked, radio('precip').checked, radio('precip-global').checked]).toEqual([false, true, false]);
-
-        await wrapper.get('[data-test="rain-precip-global"]').setValue(true);
-        expect(settings.precip).toBe('precip-global');
-        expect([radio('none').checked, radio('precip').checked, radio('precip-global').checked]).toEqual([false, false, true]);
+        const pressed = (t: string): string | undefined => wrapper!.get(`[data-test=${t}]`).attributes('aria-pressed');
+        await wrapper.get('[data-test=toggle-precip]').trigger('click');
+        expect(settings.precipRegional).toBe(true);
+        expect(settings.precipGlobal).toBe(false);
+        await wrapper.get('[data-test=toggle-precip-global]').trigger('click');
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([true, true]);
+        expect([pressed('toggle-precip'), pressed('toggle-precip-global')]).toEqual(['true', 'true']);
+        await wrapper.get('[data-test=toggle-precip]').trigger('click');
+        expect([settings.precipRegional, settings.precipGlobal]).toEqual([false, true]);
+        expect([pressed('toggle-precip'), pressed('toggle-precip-global')]).toEqual(['false', 'true']);
+        expect(settings.clouds).toBe(false);
+        expect(settings.radars).toBe(false);
     });
 
-    it('shows a "current" pill on clouds and radar when a forecast time is selected', async () => {
+    it('shows a quiet now dot on clouds and radar only in the forecast, with Rain on', async () => {
         toggleLayer('clouds', true);
         toggleLayer('radars', true);
-        setPrecip('precip');
+        setRain('precip-global');
         wrapper = mount(LayerControls);
-        expect(wrapper.find('[data-test=current-clouds]').exists()).toBe(false);
-        expect(wrapper.find('[data-test=current-radars]').exists()).toBe(false);
+        expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
+        expect(wrapper.find('[data-test=now-radars]').exists()).toBe(false);
+
+        setFrame(-4);
+        await nextTick();
+        expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
 
         setFrame(6);
         await nextTick();
-        expect(wrapper.get('[data-test=current-clouds]').text()).toBe('current');
-        expect(wrapper.get('[data-test=current-radars]').attributes('title')).toContain('shows current data');
+        expect(wrapper.get('[data-test=now-clouds]').attributes('title')).toBe('Shows the latest frame; no forecast');
+        expect(wrapper.get('[data-test=now-radars]').text()).toBe('');
+        expect(wrapper.get('[data-test=toggle-clouds]').text()).toContain('latest frame only');
+        expect(wrapper.find('.badge').exists()).toBe(false);
 
         toggleLayer('clouds', false);
         await nextTick();
-        expect(wrapper.find('[data-test=current-clouds]').exists()).toBe(false);
-        expect(wrapper.find('[data-test=current-radars]').exists()).toBe(true);
+        expect(wrapper.find('[data-test=now-clouds]').exists()).toBe(false);
+        expect(wrapper.find('[data-test=now-radars]').exists()).toBe(true);
     });
 });
 
-describe('ForecastSlider', () => {
+describe('TimelineSlider', () => {
     const slider = () => wrapper!.get('[data-test=slider]');
     const input = async (v: number): Promise<void> => {
         // setValue would also fire "change"; a drag only fires "input".
@@ -106,57 +115,90 @@ describe('ForecastSlider', () => {
         await el.trigger('input');
     };
 
-    it('is disabled, with an explanation, when no rain layer is selected', () => {
-        wrapper = mount(ForecastSlider);
+    it('is disabled, with an explanation, when no layer is on', () => {
+        wrapper = mount(TimelineSlider);
         expect(slider().attributes('disabled')).toBeDefined();
         expect(wrapper.get('[data-test=now]').attributes('disabled')).toBeDefined();
-        expect(wrapper.get('[data-test=forecast]').attributes('title')).toBe('Select Regional or Global rain to use the forecast');
-        expect(wrapper.get('[data-test=label]').text()).toContain('Current data');
+        expect(wrapper.get('[data-test=timeline]').attributes('title')).toBe('Turn on a layer to use the timeline');
     });
 
-    it('is an index slider from 0 to 24 with ticks', () => {
-        setPrecip('precip');
-        wrapper = mount(ForecastSlider);
+    it('is enabled by Clouds alone and then only covers the past', () => {
+        toggleLayer('clouds', true);
+        wrapper = mount(TimelineSlider);
         expect(slider().attributes('disabled')).toBeUndefined();
-        expect(slider().attributes('min')).toBe('0');
+        expect(slider().attributes('min')).toBe('-12');
+        expect(slider().attributes('max')).toBe('0');
+    });
+
+    it('is an index slider from -12 to 24 with Rain on', () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
+        expect(slider().attributes('disabled')).toBeUndefined();
+        expect(slider().attributes('min')).toBe('-12');
         expect(slider().attributes('max')).toBe('24');
         expect(slider().attributes('step')).toBe('1');
-        expect(slider().attributes('aria-label')).toBe('Forecast time');
-        expect(wrapper.findAll('datalist option').map((o) => o.attributes('value'))).toEqual(['0', '6', '12', '18', '24']);
+        expect(slider().attributes('aria-label')).toBe('Weather time');
+        expect(wrapper.find('datalist').exists()).toBe(false);
+    });
+
+    it('the range follows Rain being switched on and off', async () => {
+        toggleLayer('clouds', true);
+        wrapper = mount(TimelineSlider);
+        expect(slider().attributes('max')).toBe('0');
+        setRain('precip-global');
+        await nextTick();
+        expect(slider().attributes('max')).toBe('24');
+        setRain('none');
+        await nextTick();
+        expect(slider().attributes('max')).toBe('0');
+    });
+
+    it('draws a purely visual Now mark at the position of frame 0', async () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
+        const mark = wrapper.get('[data-test=now-mark]');
+        expect(mark.attributes('aria-hidden')).toBe('true');
+        expect(mark.attributes('style')).toContain('pointer-events: none');
+        // 12 of the 36 steps lie before Now
+        expect(mark.attributes('style')).toContain('0.3333');
+        toggleLayer('clouds', true);
+        setRain('none');
+        await nextTick();
+        expect(wrapper.get('[data-test=now-mark]').attributes('style')).toContain('7px + 1 *');
     });
 
     it('debounces input by 150 ms and commits once', async () => {
         vi.useFakeTimers();
-        setPrecip('precip');
+        setRain('precip');
         const seen: number[] = [];
         const stop = watch(() => session.frame, (v) => seen.push(v), { flush: 'sync' });
-        wrapper = mount(ForecastSlider);
+        wrapper = mount(TimelineSlider);
 
         await input(3);
         expect(session.draftFrame).toBe(3);
         expect(session.frame).toBe(0);
 
         vi.advanceTimersByTime(100);
-        await input(4);
+        await input(-4);
         vi.advanceTimersByTime(149);
         expect(session.frame).toBe(0);
-        expect(session.draftFrame).toBe(4);
+        expect(session.draftFrame).toBe(-4);
 
         vi.advanceTimersByTime(1);
-        expect(session.frame).toBe(4);
+        expect(session.frame).toBe(-4);
         expect(session.draftFrame).toBeNull();
 
         vi.advanceTimersByTime(1000);
-        expect(seen).toEqual([4]);
+        expect(seen).toEqual([-4]);
         stop();
     });
 
     it('commits immediately on change and cancels the pending debounce', async () => {
         vi.useFakeTimers();
-        setPrecip('precip');
+        setRain('precip');
         const seen: number[] = [];
         const stop = watch(() => session.frame, (v) => seen.push(v), { flush: 'sync' });
-        wrapper = mount(ForecastSlider);
+        wrapper = mount(TimelineSlider);
 
         await input(5);
         (slider().element as HTMLInputElement).value = '7';
@@ -169,11 +211,11 @@ describe('ForecastSlider', () => {
     });
 
     it('does nothing when the committed frame is unchanged', async () => {
-        setPrecip('precip');
+        setRain('precip');
         setFrame(4);
         const seen: number[] = [];
         const stop = watch(() => session.frame, (v) => seen.push(v), { flush: 'sync' });
-        wrapper = mount(ForecastSlider);
+        wrapper = mount(TimelineSlider);
 
         (slider().element as HTMLInputElement).value = '4';
         await slider().trigger('change');
@@ -181,44 +223,86 @@ describe('ForecastSlider', () => {
         stop();
     });
 
-    it('Now returns to frame 0 at once and is disabled at 0', async () => {
-        setPrecip('precip');
+    it('Now returns to frame 0 at once from the past and the future, and is disabled at 0', async () => {
+        setRain('precip');
         setFrame(9);
-        wrapper = mount(ForecastSlider);
+        wrapper = mount(TimelineSlider);
         const now = wrapper.get('[data-test=now]');
         expect(now.attributes('disabled')).toBeUndefined();
 
         await now.trigger('click');
         expect(session.frame).toBe(0);
         expect(now.attributes('disabled')).toBeDefined();
+
+        setFrame(-5);
+        await nextTick();
+        expect(now.attributes('disabled')).toBeUndefined();
+        await now.trigger('click');
+        expect(session.frame).toBe(0);
     });
 
-    it('describes the position in aria-valuetext', async () => {
-        setPrecip('precip');
-        wrapper = mount(ForecastSlider);
-        expect(slider().attributes('aria-valuetext')).toBe('Now, ~Thu 00:00 UTC');
+    it('shows a compact label and uses it as aria-valuetext', async () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
+        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 00:00');
+        expect(slider().attributes('aria-valuetext')).toBe('Now · 00:00');
 
         setFrame(12);
         await nextTick();
-        expect(slider().attributes('aria-valuetext')).toBe('~Thu 02:00 UTC, plus 120 minutes');
+        expect(wrapper.get('[data-test=label]').text()).toBe('+120 min · 02:00');
+        expect(slider().attributes('aria-valuetext')).toBe('+120 min · 02:00');
+
+        setFrame(-4);
+        await nextTick();
+        expect(wrapper.get('[data-test=label]').text()).toBe('-40 min · 23:20');
+        expect(slider().attributes('aria-valuetext')).toBe('-40 min · 23:20');
+        expect(wrapper.get('[data-test=label]').attributes('title')).toBe('-40 min · Wed 23:20 UTC');
     });
 
-    it('shows the label on two truncating lines and the full text in its title', async () => {
-        setPrecip('precip');
-        setFrame(12);
-        wrapper = mount(ForecastSlider);
+    it('follows the time zone setting', async () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
+        setTimeZone('Pacific/Auckland');
+        await nextTick();
+        expect(wrapper.get('[data-test=label]').text()).toBe('Now · 13:00');
+    });
+
+    it('the label is one truncating line, without the old approximation marker', () => {
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
         const label = wrapper.get('[data-test=label]');
-        expect(label.findAll('.text-truncate')).toHaveLength(2);
-        expect(label.attributes('title')).toContain('~Thu 02:00 UTC');
-        expect(label.attributes('title')).toContain('+120 min');
+        expect(label.classes()).toContain('text-truncate');
+        expect(label.text()).not.toContain('~');
         expect(wrapper.find('[data-test=note]').exists()).toBe(false);
     });
 
     it('has no Play button', () => {
-        setPrecip('precip');
-        wrapper = mount(ForecastSlider);
+        setRain('precip');
+        wrapper = mount(TimelineSlider);
         expect(wrapper.findAll('button').some((b) => /play/i.test(b.text() + (b.attributes('aria-label') ?? '')))).toBe(false);
         expect(wrapper.html()).not.toMatch(/play/i);
+    });
+
+    const HEALTH: [string, HealthState, string][] = [
+        ['ok', { kind: 'ok' }, ''],
+        ['limited', { kind: 'limited', until: 1 }, 'Rate limited, retrying'],
+        ['session expired', { kind: 'denied', status: 401 }, 'Session expired'],
+        ['disabled', { kind: 'denied', status: 403 }, 'Disabled by admin'],
+        ['unavailable', { kind: 'degraded', since: 1, status: 404 }, 'Weather unavailable'],
+        ['service unavailable', { kind: 'degraded', since: 1, status: 502 }, 'Weather unavailable'],
+    ];
+
+    it.each(HEALTH)('the %s state is a status icon with a short title and aria-label', async (_name, state, text) => {
+        toggleLayer('clouds', true);
+        session.health = state;
+        wrapper = mount(TimelineSlider);
+        await nextTick();
+        const status = wrapper.get('[role=status]');
+        expect(status.attributes('data-test')).toBe('health');
+        expect(status.text()).toBe('');
+        expect(status.attributes('title')).toBe(text || undefined);
+        expect(status.attributes('aria-label')).toBe(text || undefined);
+        expect(status.find('svg').exists()).toBe(text !== '');
     });
 });
 
@@ -231,61 +315,101 @@ describe('WeatherSettings', () => {
             expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Palette 4');
         }
     });
+
+    it('has an opacity slider per layer, including Rain Global, and one shared Rain palette', async () => {
+        wrapper = mount(WeatherSettings);
+        for (const slot of ['clouds', 'precip-global', 'precip', 'radars']) {
+            expect(wrapper.find(`[data-test=opacity-${slot}]`).exists()).toBe(true);
+        }
+        const global = wrapper.get('[data-test=opacity-precip-global]');
+        (global.element as HTMLInputElement).value = '0.4';
+        await global.trigger('input');
+        expect(settings.opacity['precip-global']).toBe(0.4);
+        expect(settings.opacity.precip).toBe(0.7);
+        expect(wrapper.findAll('[data-test^=palette-]').map((e) => e.attributes('data-test'))).toEqual(['palette-precip', 'palette-radars']);
+        expect(wrapper.find('input[type=radio][data-test^=rain]').exists()).toBe(false);
+    });
+
+    it('holds the explanations and the Rainbow.ai link that the panel no longer shows', () => {
+        wrapper = mount(WeatherSettings);
+        const link = wrapper.get('[data-test=attribution-link]');
+        expect(link.attributes('href')).toBe('https://rainbow.ai');
+        expect(link.attributes('rel')).toBe('noopener');
+        expect(link.attributes('target')).toBe('_blank');
+        expect(wrapper.get('[data-test=attribution]').text()).toBe('Weather data provided by Rainbow.ai');
+        const layers = wrapper.get('[data-test=about-layers]').text();
+        expect(layers).toContain('Only Rain has a forecast');
+        expect(layers).toContain('Regional');
+        const timeline = wrapper.get('[data-test=about-timeline]').text();
+        expect(timeline).toContain('last 2 hours');
+        expect(timeline).toContain('hold their newest frame');
+    });
 });
 
 describe('WeatherBar', () => {
-    let control: WeatherControl | undefined;
-
-    afterEach(() => {
-        control?.destroy();
-        control = undefined;
-    });
-
     const bar = (): VueWrapper => wrapper!;
+    const text = (): string => bar().element.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
-    it('renders the row and the controls card, with no bar button', () => {
+    it('renders ONE card holding the chips on top and the timeline row below', () => {
         wrapper = mount(WeatherBar);
-        const row = bar().get('[data-test=row]');
-        expect(row.find('[data-test=slider]').exists()).toBe(true);
-        expect(row.find('[data-test=now]').exists()).toBe(true);
-        expect(row.find('[data-test=label]').exists()).toBe(true);
-        expect(row.find('[data-test=settings]').exists()).toBe(true);
-        const controls = bar().get('[data-test=controls]');
-        expect(controls.find('[data-test=layer-controls]').exists()).toBe(true);
-        expect(controls.get('[data-test=attribution]').text()).toBe('Weather data provided by Rainbow.ai');
+        expect(bar().findAll('.cloudtak-panel')).toHaveLength(1);
+        const card = bar().get('[data-test=card]');
+        expect(card.classes()).toContain('cloudtak-panel');
+        const layers = card.get('[data-test=layers]');
+        const row = card.get('[data-test=row]');
+        expect(layers.find('[data-test=layer-controls]').exists()).toBe(true);
         expect(row.find('[data-test=layer-controls]').exists()).toBe(false);
+        for (const t of ['now', 'slider', 'label', 'health', 'settings']) expect(row.find(`[data-test=${t}]`).exists()).toBe(true);
+        // layers section comes first
+        expect(layers.element.compareDocumentPosition(row.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(bar().find('[data-test=controls]').exists()).toBe(false);
         expect(bar().find('[data-test=bar-button]').exists()).toBe(false);
         expect(bar().get('[data-test=weather-bar]').attributes('style')).toContain('width: min(640px');
     });
 
-    it('shows the current-data note in the controls card only while a layer is on', async () => {
-        wrapper = mount(WeatherBar);
-        expect(bar().find('[data-test=note]').exists()).toBe(false);
-
+    it('has no note, attribution or always-visible health text', async () => {
         toggleLayer('radars', true);
+        session.health = { kind: 'limited', until: 1 };
+        wrapper = mount(WeatherBar);
         await nextTick();
-        expect(bar().get('[data-test=controls] [data-test=note]').text())
-            .toBe('Clouds and radar always show the current data. Forecast applies to rain only.');
-
-        toggleLayer('radars', false);
-        await nextTick();
-        expect(bar().find('[data-test=note]').exists()).toBe(false);
+        for (const t of ['note', 'attribution']) expect(bar().find(`[data-test=${t}]`).exists()).toBe(false);
+        expect(text()).not.toMatch(/Rainbow|current data|Forecast applies|Rate limited|provided by/i);
+        expect(bar().get('[data-test=health]').text()).toBe('');
     });
 
-    it('Escape closes the panel and returns focus to the weather button', async () => {
-        const fake = new EventedFakeMap();
-        control = new WeatherControl({ onToggle: () => undefined });
-        fake.addControl(control, 'top-left');
-        session.panelOpen = true;
-        wrapper = mount(WeatherBar, { attachTo: document.body });
-        const toggle = bar().get('[data-test=toggle-clouds]');
-        (toggle.element as HTMLElement).focus();
+    it('shows only the allowed text', () => {
+        setRain('precip');
+        toggleLayer('clouds', true);
+        toggleLayer('radars', true);
+        wrapper = mount(WeatherBar);
+        const rest = text().replace(/Clouds|Radar|Rain|Off|Regional|Global|Now|[\d:+\-·]|min/g, '').trim();
+        expect(rest).toBe('');
+        expect(text()).toContain('Now · 00:00');
+    });
 
-        await toggle.trigger('keydown', { key: 'Escape' });
+    it('either Rain layer gives the forecast range, with no Rain there is no forecast frame', async () => {
+        toggleLayer('clouds', true);
+        wrapper = mount(WeatherBar);
+        const max = (): string | undefined => bar().get('[data-test=slider]').attributes('max');
+        expect(max()).toBe('0');
+        for (const mode of ['precip', 'precip-global', 'both'] as const) {
+            setRain(mode);
+            await nextTick();
+            expect(max()).toBe('24');
+            setRain('none');
+            await nextTick();
+            expect(max()).toBe('0');
+        }
+    });
+
+    it('the slider range follows Rain', async () => {
+        toggleLayer('clouds', true);
+        wrapper = mount(WeatherBar);
+        expect(bar().get('[data-test=slider]').attributes('max')).toBe('0');
+        setRain('precip');
         await nextTick();
-
-        expect(session.panelOpen).toBe(false);
-        expect(document.activeElement).toBe(document.querySelector(`.${CONTROL_CLASS} button`));
+        expect(bar().get('[data-test=slider]').attributes('max')).toBe('24');
+        expect(bar().get('[data-test=slider]').attributes('min')).toBe('-12');
     });
 
     it('the settings gear opens the settings route and leaves the panel open', async () => {
@@ -296,21 +420,10 @@ describe('WeatherBar', () => {
         expect(session.panelOpen).toBe(true);
     });
 
-    const HEALTH: [string, HealthState, string][] = [
-        ['ok', { kind: 'ok' }, ''],
-        ['limited', { kind: 'limited', until: 1 }, 'Rate limited, retrying'],
-        ['session expired', { kind: 'denied', status: 401 }, 'Session expired: reload CloudTAK'],
-        ['disabled', { kind: 'denied', status: 403 }, 'Weather is disabled by an administrator'],
-        ['unavailable', { kind: 'degraded', since: 1, status: 404 }, 'Weather unavailable'],
-        ['service unavailable', { kind: 'degraded', since: 1, status: 502 }, 'Weather service unavailable'],
-    ];
-
-    it.each(HEALTH)('shows the %s text in the status region of the controls card', async (_name, state, text) => {
-        session.health = state;
-        wrapper = mount(WeatherBar);
-        await nextTick();
-        const status = bar().get('[data-test=controls] [role=status]');
-        expect(status.attributes('data-test')).toBe('health');
-        expect(status.text()).toBe(text);
+    it('does not handle Escape itself (the plugin does, at document level)', async () => {
+        session.panelOpen = true;
+        wrapper = mount(WeatherBar, { attachTo: document.body });
+        await bar().get('[data-test=toggle-clouds]').trigger('keydown', { key: 'Escape' });
+        expect(session.panelOpen).toBe(true);
     });
 });

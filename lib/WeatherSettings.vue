@@ -14,7 +14,7 @@
             >
                 <label
                     class='form-label m-0'
-                    style='width: 5rem;'
+                    style='width: 7rem;'
                     :for='`${id}-opacity-${slot.key}`'
                     v-text='slot.label'
                 />
@@ -173,16 +173,44 @@
             </label>
         </fieldset>
 
-        <section class='small text-secondary d-flex flex-column gap-1'>
-            <div v-text='FORECAST_NOTE' />
-            <div>
-                Weather data provided by
-                <a
-                    href='https://rainbow.ai'
-                    target='_blank'
-                    rel='noopener'
-                >Rainbow.ai</a>
-            </div>
+        <section class='d-flex flex-column gap-1'>
+            <h3 class='card-title m-0'>
+                About the layers
+            </h3>
+            <ul
+                class='small text-secondary m-0 ps-3 d-flex flex-column gap-1'
+                data-test='about-layers'
+            >
+                <li>Rain is precipitation derived from radar. Rain Regional covers New Zealand and the nearby Pacific in more detail; Rain Global covers the world. Both can be on at the same time. Only Rain has a forecast, up to 4 hours ahead.</li>
+                <li>Radar shows observed radar echoes.</li>
+                <li>Clouds shows satellite cloud cover.</li>
+            </ul>
+        </section>
+
+        <section class='d-flex flex-column gap-1'>
+            <h3 class='card-title m-0'>
+                Timeline
+            </h3>
+            <ul
+                class='small text-secondary m-0 ps-3 d-flex flex-column gap-1'
+                data-test='about-timeline'
+            >
+                <li>The slider covers the last 2 hours in 10-minute steps, then Now, then the Rain forecast.</li>
+                <li>Clouds and Radar hold their newest frame after Now. When a layer is behind the others, frames can repeat, and Now can be 10 to 20 minutes newer than that layer's data.</li>
+            </ul>
+        </section>
+
+        <section
+            class='small text-secondary'
+            data-test='attribution'
+        >
+            Weather data provided by
+            <a
+                href='https://rainbow.ai'
+                target='_blank'
+                rel='noopener'
+                data-test='attribution-link'
+            >Rainbow.ai</a>
         </section>
 
         <div>
@@ -201,7 +229,7 @@
 <script setup lang='ts'>
 import { useId } from 'vue';
 import type { LayerSlot, PaletteCode, TimeZoneSetting } from './types.ts';
-import { FORECAST_NOTE, PALETTES } from './constants.ts';
+import { PALETTES } from './constants.ts';
 import {
     resetSettings,
     setCoverage,
@@ -216,7 +244,8 @@ import {
 const id = `taknz-wx-${useId()}`;
 
 const SLOTS: { key: LayerSlot; label: string }[] = [
-    { key: 'precip', label: 'Rain' },
+    { key: 'precip', label: 'Rain Regional' },
+    { key: 'precip-global', label: 'Rain Global' },
     { key: 'radars', label: 'Radar' },
     { key: 'clouds', label: 'Clouds' },
 ];

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { HealthMonitor, PAUSE_MS } from '../lib/health.ts';
+import { HealthMonitor, PAUSE_MS, healthMessage, healthShort } from '../lib/health.ts';
 import type { HealthState } from '../lib/types.ts';
 
 function setup(): { h: HealthMonitor; t: { now: number }; log: { warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> }; changes: HealthState[] } {
@@ -15,6 +15,24 @@ const err = (status?: number, sourceId = 'taknz-wx-precip-src') => ({
     error: status === undefined ? new Error('network') : Object.assign(new Error('http'), { status }),
 });
 
+describe('healthShort', () => {
+    it.each<[string, HealthState, string]>([
+        ['ok', { kind: 'ok' }, ''],
+        ['limited', { kind: 'limited', until: 1 }, 'Rate limited, retrying'],
+        ['401', { kind: 'denied', status: 401 }, 'Session expired'],
+        ['403', { kind: 'denied', status: 403 }, 'Disabled by admin'],
+        ['degraded 404', { kind: 'degraded', since: 1, status: 404 }, 'Weather unavailable'],
+        ['degraded 502', { kind: 'degraded', since: 1, status: 502 }, 'Weather unavailable'],
+        ['degraded without status', { kind: 'degraded', since: 1 }, 'Weather unavailable'],
+    ])('%s gives a short text', (_name, state, text) => {
+        expect(healthShort(state)).toBe(text);
+    });
+    it('is never longer than the long message', () => {
+        for (const s of [{ kind: 'limited', until: 1 }, { kind: 'denied', status: 401 }, { kind: 'denied', status: 403 }] as HealthState[]) {
+            expect(healthShort(s).length).toBeLessThanOrEqual(healthMessage(s).length);
+        }
+    });
+});
 describe('HealthMonitor', () => {
     it('starts ok with no message', () => {
         const { h } = setup();

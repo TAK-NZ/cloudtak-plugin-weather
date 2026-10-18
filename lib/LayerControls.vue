@@ -18,11 +18,34 @@
             />
             <span>Clouds</span>
             <span
-                v-if='showCurrent && settings.clouds'
-                class='badge bg-secondary-lt'
-                data-test='current-clouds'
-                :title='CURRENT_TITLE'
-            >current</span>
+                v-if='showNow && settings.clouds'
+                class='d-inline-block rounded-circle bg-secondary'
+                style='width: 6px; height: 6px; opacity: 0.8;'
+                data-test='now-clouds'
+                :title='NOW_TITLE'
+            />
+            <span
+                v-if='showNow && settings.clouds'
+                class='visually-hidden'
+            >, latest frame only</span>
+        </button>
+        <button
+            v-for='chip in RAIN_CHIPS'
+            :key='chip.key'
+            type='button'
+            class='btn d-inline-flex align-items-center gap-1'
+            :class='settings[chip.key] ? "btn-primary" : "btn-outline-secondary"'
+            :aria-pressed='settings[chip.key] ? "true" : "false"'
+            :data-test='chip.test'
+            style='min-height: 44px; min-width: 44px;'
+            @click='toggleLayer(chip.key)'
+        >
+            <component
+                :is='chip.icon'
+                :size='20'
+                stroke='1.5'
+            />
+            <span v-text='chip.label' />
         </button>
         <button
             type='button'
@@ -39,66 +62,33 @@
             />
             <span>Radar</span>
             <span
-                v-if='showCurrent && settings.radars'
-                class='badge bg-secondary-lt'
-                data-test='current-radars'
-                :title='CURRENT_TITLE'
-            >current</span>
+                v-if='showNow && settings.radars'
+                class='d-inline-block rounded-circle bg-secondary'
+                style='width: 6px; height: 6px; opacity: 0.8;'
+                data-test='now-radars'
+                :title='NOW_TITLE'
+            />
+            <span
+                v-if='showNow && settings.radars'
+                class='visually-hidden'
+            >, latest frame only</span>
         </button>
-        <fieldset
-            role='radiogroup'
-            aria-label='Rain'
-            class='d-inline-flex align-items-center gap-1 border-0 p-0 m-0'
-            data-test='rain-group'
-        >
-            <legend class='visually-hidden'>
-                Rain
-            </legend>
-            <span class='me-1'>
-                <IconCloudRain
-                    :size='20'
-                    stroke='1.5'
-                />
-                Rain
-            </span>
-            <label
-                v-for='opt in RAIN_OPTIONS'
-                :key='opt.value'
-                class='btn d-inline-flex align-items-center mb-0'
-                :class='settings.precip === opt.value ? "btn-primary" : "btn-outline-secondary"'
-                style='min-height: 44px; min-width: 44px;'
-            >
-                <input
-                    type='radio'
-                    class='visually-hidden'
-                    :name='groupName'
-                    :value='opt.value'
-                    :checked='settings.precip === opt.value'
-                    :data-test='`rain-${opt.value}`'
-                    @change='setPrecip(opt.value)'
-                >
-                {{ opt.label }}
-            </label>
-        </fieldset>
     </div>
 </template>
 
 <script setup lang='ts'>
-import { computed, useId } from 'vue';
-import { IconCloud, IconCloudRain, IconRadar } from '@tabler/icons-vue';
-import type { PrecipMode } from './types.ts';
-import { session, setPrecip, settings, toggleLayer } from './state.ts';
+import { computed } from 'vue';
+import { IconCloud, IconCloudRain, IconRadar, IconWorld } from '@tabler/icons-vue';
+import type { ToggleKey } from './types.ts';
+import { rainOn, session, settings, toggleLayer } from './state.ts';
 
-const CURRENT_TITLE = 'Forecast time applies to rain only. This layer shows current data.';
+const NOW_TITLE = 'Shows the latest frame; no forecast';
 
-const RAIN_OPTIONS: { value: PrecipMode; label: string }[] = [
-    { value: 'none', label: 'Off' },
-    { value: 'precip', label: 'Regional' },
-    { value: 'precip-global', label: 'Global' },
+const RAIN_CHIPS: { key: ToggleKey; test: string; label: string; icon: typeof IconCloudRain }[] = [
+    { key: 'precipRegional', test: 'toggle-precip', label: 'Rain Regional', icon: IconCloudRain },
+    { key: 'precipGlobal', test: 'toggle-precip-global', label: 'Rain Global', icon: IconWorld },
 ];
 
-const groupName = `taknz-wx-rain-${useId()}`;
-
-// Clouds and radar always show the current data; flag that once a forecast is selected.
-const showCurrent = computed(() => session.frame > 0 && settings.precip !== 'none');
+// Clouds and radar hold their newest frame in the forecast; mark that quietly.
+const showNow = computed(() => session.frame > 0 && rainOn(settings));
 </script>

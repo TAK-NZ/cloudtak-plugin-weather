@@ -1,21 +1,20 @@
 # Weather
 
-CloudTAK plugin that adds rain, radar and cloud layers to the map, with a rain forecast slider.
+CloudTAK plugin that adds rain, radar and cloud layers to the map, with a timeline from 2 hours ago to a 4 hour rain forecast.
 
 Weather data provided by [Rainbow.ai](https://rainbow.ai).
 
 ## What it does
 
-* A weather button sits in the map's left controls, under the 3D terrain button. A dot on it shows that a layer is on while the panel is closed. Click it to open the weather bar at the bottom of the map; click it again, or press Escape, to close it. Closing the bar leaves the layers on. All layers are off by default, so nothing is requested until you turn one on.
-* **Clouds** and **Radar** are toggles. **Rain** is Off, Regional or Global.
-* The **forecast slider** moves rain from **Now** up to 4 hours ahead in 10 minute steps. Clouds and radar always show the current data; they get a `current` tag while a forecast time is selected. The forecast is not remembered: the map opens at Now.
-* The **Weather** menu entry (right-side menu, or the gear in the open bar) has per-layer opacity, rain and radar colour palettes, a coverage mask, radar precipitation type, map tile sharpness, and the time zone for labels (New Zealand, UTC or this device). Settings are stored in the browser.
-* Rain and radar use colour palette 4 by default. A stored default of palette 0 from an earlier version is switched to 4 once; other choices are kept, and a palette 0 you pick afterwards stays.
-* Times are shown as approximate (`~`) because the weather service picks its own latest 10 minute data slot.
-
+* A weather button sits in the map's left controls, under the 3D terrain button. A dot on it shows that a layer is on while the panel is closed. Click it to open the weather panel at the bottom of the map; click it again, or press Escape (focus returns to the button), to close it. Closing the panel leaves the layers on. All layers are off by default, so nothing is requested until you turn one on.
+* The panel is one box. The top row has four independent layer toggles: **Clouds**, **Rain Regional**, **Rain Global** and **Radar**. Any combination can be on; they stack in that order, bottom to top (Clouds, Rain Global, Rain Regional, Radar). The bottom row has **Now**, the time slider, the time of the frame (for example `Now · 14:20`, `-40 min · 13:40`, `+30 min · 14:50`) and the settings gear. A warning icon appears next to the time when the weather service has a problem.
+* The **time slider** covers the last 2 hours in 10 minute steps, a small mark at **Now**, and, while either Rain layer is on, the rain forecast up to 4 hours ahead. The arrow keys move one step. Clouds and Radar show the past exactly and hold their newest frame after Now (a quiet dot on their toggle shows this). The map always opens, and closes, at Now.
+* The **Weather** menu entry (right-side menu, or the gear in the panel) has per-layer opacity (Rain Regional and Rain Global separately), one colour palette for both Rain layers and one for Radar, a coverage mask, radar precipitation type, map tile sharpness, and the time zone for labels (New Zealand, UTC or this device). It also explains the layers and the timeline. Settings are stored in the browser.
+* Settings saved by an earlier version (one Rain choice: Off, Regional or Global) are converted once to the two Rain toggles. Rain and radar use colour palette 4 by default. A stored default of palette 0 from an earlier version is switched to 4 once; other choices are kept, and a palette 0 you pick afterwards stays.
+* The map shows "Weather © Rainbow.ai" as source attribution while a weather layer is on. The settings page links to Rainbow.ai.
 ## Requirements
 
-A CloudTAK server that provides `/api/weather/status` and `/api/weather/tile/{z}/{x}/{y}.png`, which is the [TAK-NZ CloudTAK fork](https://github.com/TAK-NZ/CloudTAK). If the endpoint is missing or switched off, the plugin adds nothing to the app.
+A CloudTAK server that provides `/api/weather/status` and `/api/weather/tile/{z}/{x}/{y}.png`, which is the [TAK-NZ CloudTAK fork](https://github.com/TAK-NZ/CloudTAK). If the endpoint is missing or switched off, the plugin adds nothing to the app. A status with a per-layer `latest` lets the timeline line up with each layer's newest data; with an older relay the plugin uses the status snapshot and still works.
 
 The server holds the weather service key and relays the tiles. Set these environment variables on the CloudTAK API task:
 
