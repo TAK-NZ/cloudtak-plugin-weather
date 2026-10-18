@@ -6,7 +6,7 @@ import MenuTemplate from './lib/MenuTemplate.vue';
 import WeatherBar from './lib/WeatherBar.vue';
 import WeatherSettings from './lib/WeatherSettings.vue';
 import { IconWeather } from './lib/icon.ts';
-import { WeatherControl, focusWeatherControl } from './lib/control.ts';
+import { WeatherControl, controlLabel, focusWeatherControl } from './lib/control.ts';
 import type { ControlHost } from './lib/control.ts';
 import { host } from './lib/host.ts';
 import { BOTTOM_KEY, ID_PREFIX, MENU_KEY, PANEL_ID, ROUTE_NAME, ROUTE_PATH } from './lib/constants.ts';
@@ -458,8 +458,9 @@ export default class WeatherPlugin implements PluginInstance {
         const open = session.panelOpen;
         const message = healthMessage(session.health);
         control.setOpen(open);
-        control.setActive(!open && anyLayer());
-        control.setTitle(message ? `Weather Controls: ${message}` : 'Weather Controls');
+        const active = !open && anyLayer();
+        control.setActive(active);
+        control.setTitle(message ? `${controlLabel(active)}: ${message}` : controlLabel(active));
     }
 
     /** Take over a status: server clock, per-layer latest and the anchor of the timeline. */

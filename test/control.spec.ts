@@ -106,18 +106,28 @@ describe('state', () => {
         expect(buttonOf().getAttribute('aria-pressed')).toBe('false');
     });
 
-    it('setActive shows the dot, setTitle changes only the tooltip', () => {
+    it('setActive shows the dot and puts the state in the accessible name and tooltip', () => {
         add();
         const dot = buttonOf().querySelector('.taknz-wx-dot') as HTMLElement;
         expect(dot.style.display).toBe('none');
         control.setActive(true);
         expect(dot.style.display).toBe('');
+        expect(buttonOf().getAttribute('aria-label')).toBe('Weather Controls, layers on, controls hidden');
+        expect(buttonOf().title).toBe('Weather Controls, layers on, controls hidden');
         control.setActive(false);
         expect(dot.style.display).toBe('none');
+        expect(buttonOf().getAttribute('aria-label')).toBe('Weather Controls');
+        expect(buttonOf().title).toBe('Weather Controls');
+    });
 
+    it('setTitle changes only the tooltip', () => {
+        add();
         control.setTitle('Weather Controls: Weather unavailable');
         expect(buttonOf().title).toBe('Weather Controls: Weather unavailable');
         expect(buttonOf().getAttribute('aria-label')).toBe('Weather Controls');
+        control.setActive(true);
+        control.setTitle('Weather Controls, layers on, controls hidden: Weather unavailable');
+        expect(buttonOf().getAttribute('aria-label')).toBe('Weather Controls, layers on, controls hidden');
     });
 
     it('focus() and focusWeatherControl() focus the button', () => {

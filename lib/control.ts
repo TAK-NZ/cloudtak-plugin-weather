@@ -88,6 +88,10 @@ html[data-bs-theme='light'] ${SCOPE} > button:focus-visible {
 `;
 
 let currentFocus: (() => void) | null = null;
+/** The accessible name and base tooltip of the button; `active` is the state the dot shows. */
+export function controlLabel(active: boolean): string {
+    return active ? 'Weather Controls, layers on, controls hidden' : 'Weather Controls';
+}
 
 /** Move keyboard focus to the weather button, if a control is on the map. */
 export function focusWeatherControl(): void {
@@ -238,12 +242,20 @@ export class WeatherControl implements IControlLike {
         this.button?.setAttribute('aria-pressed', open ? 'true' : 'false');
     }
 
-    /** Show or hide the small dot that says a weather layer is on. */
+    /**
+     * Show or hide the small dot that says a weather layer is on and the controls are hidden.
+     * The dot is not the only signal: the accessible name and the tooltip say it too.
+     */
     setActive(active: boolean): void {
         if (this.dot) this.dot.style.display = active ? '' : 'none';
+        const label = controlLabel(active);
+        if (this.button) {
+            this.button.setAttribute('aria-label', label);
+            this.button.title = label;
+        }
     }
 
-    /** The tooltip; the accessible name stays 'Weather Controls'. */
+    /** The tooltip. Call it after setActive(), which resets it; the accessible name is left alone. */
     setTitle(title: string): void {
         if (this.button) this.button.title = title;
     }

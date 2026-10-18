@@ -437,6 +437,23 @@ describe('weather control and bottom bar', () => {
         session.health = { kind: 'ok' };
         expect(controlButton()?.title).toBe('Weather Controls');
     });
+
+    it('names the dot state in the accessible name and the tooltip, with the health message appended', async () => {
+        await running();
+        const on = 'Weather Controls, layers on, controls hidden';
+        toggleLayer('clouds', true);
+        expect(controlButton()?.getAttribute('aria-label')).toBe(on);
+        expect(controlButton()?.title).toBe(on);
+        session.health = { kind: 'degraded', since: 0, status: 502 };
+        expect(controlButton()?.title).toBe(`${on}: Weather service unavailable`);
+        expect(controlButton()?.getAttribute('aria-label')).toBe(on);
+        session.panelOpen = true;
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls');
+        expect(controlButton()?.title).toBe('Weather Controls: Weather service unavailable');
+        session.health = { kind: 'ok' };
+        session.panelOpen = false;
+        expect(controlButton()?.title).toBe(on);
+    });
 });
 
 describe('layers', () => {
@@ -1005,6 +1022,7 @@ describe('panel contract', () => {
         expect(events).toEqual(['close:taknz-weather:bottom>rubber-sheet']);
         expect(controlButton()?.getAttribute('aria-pressed')).toBe('false');
         expect(dot()?.style.display).toBe('');
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls, layers on, controls hidden');
         // It does not come back by itself when the other plugin closes.
         window.dispatchEvent(new CustomEvent(PANEL_CLOSE, { detail: { id: 'rubber-sheet', area: 'bottom' } }));
         expect(session.panelOpen).toBe(false);
