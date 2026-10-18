@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import type { PluginInstance } from '@tak-ps/cloudtak';
 
 const hostMock = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ import MenuTemplate from '../lib/MenuTemplate.vue';
 import { bindStorage, flushSave, session, setFrame, setPlaying, settings, toggleLayer } from '../lib/state.ts';
 import { togglePlay } from '../lib/player.ts';
 import { pacing } from '../lib/pacing.ts';
+import { HealthMonitor } from '../lib/health.ts';
 import { snapshotAt } from '../lib/time.ts';
 import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
 import { EventedFakeMap, deferred, jsonResponse, latestBody, makeFakeApi, setRain, statusBody } from './helpers.ts';
@@ -1136,6 +1138,39 @@ describe('play', () => {
         await vi.advanceTimersByTimeAsync(1);
         expect(session.frame).toBe(-11);
         expect(map.counters.moveLayer).toBe(0);
+    });
+
+    describe('user actions', () => {
+        it('frame changes made by Play do not count as user actions; a slider move or a toggle does', async () => {
+            const noted = vi.spyOn(HealthMonitor.prototype, 'noteUserAction');
+            const map = await begin();
+            // a relay that is not healthy: this is when a user action earns a retry
+            session.health = { kind: 'degraded', since: Date.now() };
+            await vi.advanceTimersByTimeAsync(0);
+            noted.mockClear();
+
+            togglePlay();
+            await nextTick();
+            expect(session.playing).toBe(true);
+            expect(noted).toHaveBeenCalledTimes(0);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(noted).toHaveBeenCalledTimes(0);
+            for (let i = 0; i < 3; i++) {
+                await step(map);
+                await nextTick();
+            }
+            expect(session.frame).toBeGreaterThan(-12);
+            expect(noted).toHaveBeenCalledTimes(0);
+
+            togglePlay();
+            expect(session.playing).toBe(false);
+            setFrame(-3);
+            await nextTick();
+            expect(noted).toHaveBeenCalledTimes(1);
+            toggleLayer('radars', true);
+            await nextTick();
+            expect(noted).toHaveBeenCalledTimes(2);
+        });
     });
 
     describe('pausing', () => {

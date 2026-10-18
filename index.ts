@@ -404,11 +404,13 @@ export default class WeatherPlugin implements PluginInstance {
                 act.fromPlayer = true;
                 // Resuming after a rate limit has to get through the health gate once.
                 if (session.health.kind !== 'ok') act.forceNext = true;
-                void Promise.resolve().then(() => {
-                    act.fromPlayer = false;
-                });
                 setFrame(frame);
                 session.preload = preload;
+                // The watcher below clears the flag when it runs (after Vue's flush). This is
+                // the fallback for a write that changed nothing it watches.
+                void nextTick().then(() => {
+                    act.fromPlayer = false;
+                });
             },
             preloadReady: (key) => act.stack?.preloadReady(key) ?? false,
             pace: this.makePacer(act),
