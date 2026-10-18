@@ -16,6 +16,7 @@ import WeatherPlugin from '../index.ts';
 import MenuTemplate from '../lib/MenuTemplate.vue';
 import { bindStorage, flushSave, session, setFrame, setPlaying, settings, toggleLayer } from '../lib/state.ts';
 import { togglePlay } from '../lib/player.ts';
+import { pacing } from '../lib/pacing.ts';
 import { snapshotAt } from '../lib/time.ts';
 import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
 import { EventedFakeMap, deferred, jsonResponse, latestBody, makeFakeApi, setRain, statusBody } from './helpers.ts';
@@ -938,8 +939,14 @@ describe('play', () => {
     const snapOf = (url: string | undefined): number => Number(new URL(url ?? 'https://x/?').searchParams.get('snapshot'));
     const frameOf = (url: string | undefined): number => (snapOf(url) - A) / 600;
 
+    // The cadence tests below assume the unpaced 700 ms frames; the pacing test turns it on.
+    beforeEach(() => {
+        pacing.enabled = false;
+    });
+
     afterEach(() => {
         vi.useRealTimers();
+        pacing.enabled = true;
     });
 
     /** What a slot shows and what its hidden buffer loads, from the map. */
@@ -1011,6 +1018,32 @@ describe('play', () => {
             if (k < 0) expect(frameOf(b.hidden)).toBe(k + 1);
             else expect(frameOf(b.hidden)).toBe(-12);
         }
+        expect(map.counters.moveLayer).toBe(0);
+    });
+
+    it('with pacing on, Play waits before it loads the next frame and the shown frame stays', async () => {
+        pacing.enabled = true;
+        const map = await begin(() => {
+            toggleLayer('clouds', true);
+            setRain('precip-global');
+        });
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        // 2 layers x 20 tiles: the first frame and the preload of -11 fit into the burst of 90
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).hidden)).toBe(-11);
+        await step(map);
+        expect(session.frame).toBe(-11);
+        // -10 costs 40 and 10 are left: it waits about 10 s, with -11 on screen and nothing preloading
+        expect(frameOf(buffers(map).hidden)).not.toBe(-10);
+        await step(map, 6000);
+        expect(session.frame).toBe(-11);
+        expect(frameOf(buffers(map).hidden)).not.toBe(-10);
+        await step(map, 4500);
+        expect(frameOf(buffers(map).hidden)).toBe(-10);
+        expect(session.frame).toBe(-11);
+        await step(map, 100);
+        expect(session.frame).toBe(-10);
         expect(map.counters.moveLayer).toBe(0);
     });
 

@@ -3,6 +3,7 @@ import {
     FRAME_MS, HOLD_MS, MAX_SUSPEND_MS, MAX_WAIT_MS, Player, bindPlayer, playRange, stopPlay, togglePlay,
 } from '../lib/player.ts';
 import type { PlayerDeps } from '../lib/player.ts';
+import { FramePacer } from '../lib/pacing.ts';
 
 interface Rig {
     player: Player;
@@ -15,7 +16,7 @@ interface Rig {
     current: { frame: number; range: { first: number; last: number }; layers: boolean };
 }
 
-function rig(over: Partial<Rig['current']> = {}): Rig {
+function rig(over: Partial<Rig['current']> = {}, pace?: PlayerDeps['pace']): Rig {
     const shows: Rig['shows'] = [];
     const states: Rig['states'] = [];
     const ready = new Set<number>();
@@ -38,6 +39,7 @@ function rig(over: Partial<Rig['current']> = {}): Rig {
         clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
         onState: (playing, resumeAt) => states.push({ playing, resumeAt }),
     };
+    if (pace) deps.pace = pace;
     return { player: new Player(deps), shows, states, deps, ready, asked, current };
 }
 
@@ -354,5 +356,176 @@ describe('togglePlay and stopPlay', () => {
         expect(r.player.isSuspended).toBe(false);
         stopPlay();
         expect(r.player.isPlaying).toBe(false);
+    });
+});
+
+/** A pacer that lets a frame start loading once `releaseAt` has passed. */
+function fakePace(releaseAt: () => number) {
+    const charges: { frame: number; at: number }[] = [];
+    return {
+        charges,
+        pace: {
+            delayMs: (): number => Math.max(0, releaseAt() - Date.now()),
+            charge: (frame: number): void => {
+                charges.push({ frame, at: Date.now() });
+            },
+        },
+    };
+}
+
+describe('Player: pacing', () => {
+    it('charges the first frame at start, then each preload as it begins', () => {
+        const f = fakePace(() => 0);
+        const r = rig({}, f.pace);
+        allReady(r);
+        r.player.start();
+        vi.advanceTimersByTime(3 * FRAME_MS);
+        expect(f.charges.map((c) => c.frame)).toEqual([-12, -11, -10, -9, -8]);
+        const gaps = r.shows.slice(1).map((s, i) => s.at - r.shows[i].at);
+        expect(gaps).toEqual(Array(3).fill(FRAME_MS));
+    });
+
+    it('does not start the preload until the pacer allows it, and keeps the shown frame', () => {
+        const t0 = Date.now();
+        const f = fakePace(() => t0 + 5000);
+        const r = rig({}, f.pace);
+        r.player.start();
+        expect(r.shows).toEqual([{ frame: -12, preload: null, at: t0 }]);
+        expect(f.charges.map((c) => c.frame)).toEqual([-12]);
+        vi.advanceTimersByTime(4999);
+        expect(r.shows).toHaveLength(1);
+        expect(r.current.frame).toBe(-12);
+        expect(r.asked).toEqual([]);
+        expect(f.charges.map((c) => c.frame)).toEqual([-12]);
+        vi.advanceTimersByTime(1);
+        expect(r.shows[1]).toMatchObject({ frame: -12, preload: -11 });
+        expect(r.current.frame).toBe(-12);
+        expect(f.charges.map((c) => c.frame)).toEqual([-12, -11]);
+        r.ready.add(-11);
+        vi.advanceTimersByTime(100);
+        expect(r.shows.at(-1)).toMatchObject({ frame: -11, preload: -10 });
+        expect(f.charges.map((c) => c.frame)).toEqual([-12, -11, -10]);
+    });
+
+    it('counts the 3 s limit from the preload start, not from when the frame was shown', () => {
+        const t0 = Date.now();
+        const f = fakePace(() => t0 + 10_000);
+        const r = rig({}, f.pace);
+        r.player.start();
+        vi.advanceTimersByTime(10_000);
+        const started = r.shows.find((s) => s.preload === -11);
+        expect(started).toBeDefined();
+        const at = started?.at ?? 0;
+        // never ready: the swap comes 3 s after the preload began
+        vi.advanceTimersByTime(MAX_WAIT_MS - 1);
+        expect(r.current.frame).toBe(-12);
+        vi.advanceTimersByTime(1);
+        expect(r.current.frame).toBe(-11);
+        expect(r.shows.find((s) => s.frame === -11)?.at).toBe(at + MAX_WAIT_MS);
+    });
+
+    it('waits for the preload to load after a paced wait', () => {
+        const t0 = Date.now();
+        const f = fakePace(() => t0 + 4000);
+        const r = rig({}, f.pace);
+        r.player.start();
+        vi.advanceTimersByTime(4000 + 2000);
+        expect(r.current.frame).toBe(-12);
+        r.ready.add(-11);
+        vi.advanceTimersByTime(100);
+        expect(r.current.frame).toBe(-11);
+    });
+
+    it('re-checks the pacer at least every 2 s', () => {
+        let releaseAt = Date.now() + 60_000;
+        const f = fakePace(() => releaseAt);
+        const r = rig({}, f.pace);
+        r.player.start();
+        vi.advanceTimersByTime(30_000);
+        // the pacer lets go early (for instance the keys were seen meanwhile)
+        releaseAt = Date.now();
+        vi.advanceTimersByTime(2000);
+        expect(r.shows.some((s) => s.preload === -11)).toBe(true);
+    });
+
+    it('stop clears the timer while Play waits for the pacer', () => {
+        const f = fakePace(() => Date.now() + 60_000);
+        const r = rig({}, f.pace);
+        r.player.start();
+        vi.advanceTimersByTime(5000);
+        expect(vi.getTimerCount()).toBe(1);
+        r.player.stop('user');
+        expect(vi.getTimerCount()).toBe(0);
+        const n = r.shows.length;
+        vi.advanceTimersByTime(120_000);
+        expect(r.shows).toHaveLength(n);
+        expect(r.current.frame).toBe(-12);
+    });
+
+    it('suspend works while Play waits for the pacer, and resumes', () => {
+        const t0 = Date.now();
+        const f = fakePace(() => t0 + 20_000);
+        const r = rig({}, f.pace);
+        r.player.start();
+        vi.advanceTimersByTime(3000);
+        const until = Date.now() + 10_000;
+        r.player.suspend(until);
+        expect(r.shows.at(-1)).toMatchObject({ frame: -12, preload: null });
+        expect(r.states.at(-1)).toEqual({ playing: true, resumeAt: until });
+        vi.advanceTimersByTime(10_000);
+        expect(r.states.at(-1)).toEqual({ playing: true, resumeAt: null });
+        // still paced until t0 + 20 s
+        expect(r.shows.at(-1)).toMatchObject({ frame: -12, preload: null });
+        vi.advanceTimersByTime(8000);
+        expect(r.shows.at(-1)).toMatchObject({ frame: -12, preload: -11 });
+    });
+
+    it('without a pacer the cadence is the old one', () => {
+        const r = rig();
+        allReady(r);
+        r.player.start();
+        vi.advanceTimersByTime(12 * FRAME_MS);
+        expect(r.shows.map((s) => s.frame)).toEqual([-12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0]);
+        for (const s of r.shows.slice(0, 12)) expect(s.preload).toBe(s.frame + 1);
+    });
+
+    it('a first pass of 37 frames x 3 layers x 20 tiles never charges more than 270 tiles in 60 s', () => {
+        const seen = new Set<string>();
+        const keysOf = (k: number): string[] => (k <= 0 ? [`rain:${k}`, `clouds:${k}`, `radar:${k}`] : [`rain:${k}`]);
+        const pacer = new FramePacer({ keysOf, tilesPerSlot: () => 20, now: () => Date.now() });
+        const log: { at: number; tiles: number }[] = [];
+        const pace: PlayerDeps['pace'] = {
+            delayMs: (k) => pacer.delayMs(k),
+            charge: (k) => {
+                const fresh = keysOf(k).filter((key) => !seen.has(key));
+                for (const key of fresh) seen.add(key);
+                if (fresh.length > 0) log.push({ at: Date.now(), tiles: fresh.length * 20 });
+                pacer.charge(k);
+            },
+        };
+        const r = rig({ range: playRange(true, true) }, pace);
+        allReady(r);
+        r.player.start();
+        vi.advanceTimersByTime(15 * 60_000);
+        // the whole first pass ran, wrapped to -12 and kept going
+        // a paced frame is shown twice: first without a preload, then with it
+        const swaps = r.shows.filter((s, i) => i === 0 || s.frame !== r.shows[i - 1].frame);
+        const frames = swaps.map((s) => s.frame);
+        expect(frames.slice(0, 37)).toEqual(Array.from({ length: 37 }, (_, i) => i - 12));
+        expect(frames.slice(37, 40)).toEqual([-12, -11, -10]);
+        expect(log.reduce((n, e) => n + e.tiles, 0)).toBe(13 * 60 + 24 * 20);
+        let max = 0;
+        for (const a of log) {
+            const sum = log.filter((b) => b.at >= a.at && b.at < a.at + 60_000).reduce((n, b) => n + b.tiles, 0);
+            max = Math.max(max, sum);
+        }
+        expect(max).toBeLessThanOrEqual(270);
+        // between 5 and 9 minutes for the first pass
+        const wrapAt = swaps[36].at - swaps[0].at;
+        expect(wrapAt).toBeGreaterThan(5 * 60_000);
+        expect(wrapAt).toBeLessThan(9 * 60_000);
+        // the second pass costs nothing and runs at full speed
+        const second = swaps.slice(37, 40).map((s) => s.at);
+        expect(second[2] - second[1]).toBe(FRAME_MS);
     });
 });

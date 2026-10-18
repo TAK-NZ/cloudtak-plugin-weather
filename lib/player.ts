@@ -5,13 +5,19 @@
  * Play is built to load as few as possible, as late as possible:
  *   1. one frame ahead, never two;
  *   2. the hidden buffer loads frame k+1 while frame k is shown;
- *   3. it advances only when the hidden buffer reports loaded, or 3000 ms after k was
- *      shown, so a slow or failing tile never stalls the loop for longer;
+ *   3. it advances only when the hidden buffer reports loaded, or 3000 ms after that
+ *      preload started, so a slow or failing tile never stalls the loop for longer;
  *   4. the swap is a change of opacity, so there is no moveLayer and no source re-creation;
  *   5. the buffer that was just replaced takes frame k+2;
  *   6. tiles of an exact frame are immutable and carry `max-age=3600`, so the second pass
  *      over the same frames is served by the browser cache;
- *   7. a relay 429 suspends playback instead of retrying it.
+ *   7. a relay 429 suspends playback instead of retrying it;
+ *   8. an optional pacer (lib/pacing.ts) says when the next frame may START loading, so
+ *      the first pass stays under the relay's fetch limits. While it makes Play wait,
+ *      frame k stays shown and committed (the label always shows the frame on screen)
+ *      and nothing is preloaded; the 3000 ms limit counts from the preload start, so a
+ *      paced wait never swaps in a frame that has not loaded. Without a pacer there is
+ *      no wait.
  *
  * Timing: 700 ms per frame, 1200 ms hold on the last frame, then back to -12.
  * All timers are injected, so the state machine runs under fake timers in the tests.
@@ -20,9 +26,11 @@ import { FRAME_MAX, FRAME_MIN } from './time.ts';
 
 export const FRAME_MS = 700;
 export const HOLD_MS = 1200;
-/** Longest wait for the tiles of the next frame, counted from when the current frame was shown. */
+/** Longest wait for the tiles of the next frame, counted from when its preload started. */
 export const MAX_WAIT_MS = 3000;
 export const POLL_MS = 100;
+/** A paced wait is re-checked at least this often. */
+export const MAX_PACE_POLL_MS = 2000;
 /** MapLibre errors carry no Retry-After, so a suspension never lasts longer than this. */
 export const MAX_SUSPEND_MS = 60_000;
 
@@ -42,6 +50,11 @@ export interface PlayerDeps {
     /** Commit `frame` and load `preload` into the hidden buffers (null = load nothing). */
     show(frame: number, preload: number | null): void;
     preloadReady(key: number): boolean;
+    /** Optional pacing of the first pass: wait before `frame` starts loading; charge when it does. */
+    pace?: {
+        delayMs(frame: number): number;
+        charge(frame: number): void;
+    };
     now(): number;
     setTimer(fn: () => void, ms: number): unknown;
     clearTimer(handle: unknown): void;
@@ -59,6 +72,8 @@ export class Player {
     private current = 0;
     /** The frame loaded into the hidden buffer (null = none). */
     private preloading: number | null = null;
+    /** When the preload of `preloading` began; the 3000 ms limit counts from here. */
+    private preloadStartedAt = 0;
 
     constructor(deps: PlayerDeps) {
         this.deps = deps;
@@ -95,10 +110,25 @@ export class Player {
         return k >= this.deps.range().last ? HOLD_MS : FRAME_MS;
     }
 
+    /** Whether the pacer lets `frame` start loading now; when it does, the frame is paid for. */
+    private mayLoad(frame: number): boolean {
+        const pace = this.deps.pace;
+        if (!pace) return true;
+        if (pace.delayMs(frame) > 0) return false;
+        pace.charge(frame);
+        return true;
+    }
+
     private showFrame(k: number): void {
         this.current = k;
         this.shownAt = this.deps.now();
-        this.preloading = this.successor(k);
+        const next = this.successor(k);
+        if (this.mayLoad(next)) {
+            this.preloading = next;
+            this.preloadStartedAt = this.shownAt;
+        } else {
+            this.preloading = null;
+        }
         this.deps.show(k, this.preloading);
         this.schedule(this.dwell(k));
     }
@@ -121,7 +151,10 @@ export class Player {
         const { first, last } = this.deps.range();
         const frame = this.deps.frame();
         const from = resuming ? this.current : (frame >= first && frame < last && frame !== 0 ? frame : first);
-        this.showFrame(from > last ? first : from);
+        const begin = from > last ? first : from;
+        // The first frame is loaded by this show: it spends the burst allowance.
+        this.deps.pace?.charge(begin);
+        this.showFrame(begin);
     }
 
     /** Stop and keep the shown frame. Safe to call at any time. */
@@ -181,17 +214,26 @@ export class Player {
             return;
         }
 
-        // The range changed under us (Rain or the forecast option switched): load the right frame.
+        // No preload yet: the pacer made us wait, or the range changed under us (Rain or the
+        // forecast option switched). Start loading the right frame once the pacer allows it.
         if (this.preloading !== next) {
+            const delay = this.deps.pace?.delayMs(next) ?? 0;
+            if (delay > 0) {
+                this.schedule(Math.min(delay, MAX_PACE_POLL_MS));
+                return;
+            }
+            this.deps.pace?.charge(next);
             this.preloading = next;
+            this.preloadStartedAt = this.deps.now();
             this.deps.show(this.current, next);
         }
 
-        if (this.deps.preloadReady(next) || waited >= MAX_WAIT_MS) {
+        const loading = this.deps.now() - this.preloadStartedAt;
+        if (this.deps.preloadReady(next) || loading >= MAX_WAIT_MS) {
             this.showFrame(next);
             return;
         }
-        this.schedule(Math.min(POLL_MS, MAX_WAIT_MS - waited));
+        this.schedule(Math.min(POLL_MS, MAX_WAIT_MS - loading));
     }
 }
 

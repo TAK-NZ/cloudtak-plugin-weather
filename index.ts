@@ -15,6 +15,8 @@ import type { StatusReason } from './lib/relay-client.ts';
 import { LayerStack, SLOT_ORDER, computeDesired, isSelected, noForecastAt, requestFor } from './lib/layers.ts';
 import type { MapLike, PreloadUrls } from './lib/layers.ts';
 import { MAX_SUSPEND_MS, Player, bindPlayer, playRange } from './lib/player.ts';
+import type { PlayerDeps } from './lib/player.ts';
+import { FALLBACK_TILES, FramePacer, estimateTiles, pacing } from './lib/pacing.ts';
 import { HealthMonitor, healthMessage } from './lib/health.ts';
 import type { MapErrorLike } from './lib/health.ts';
 import { rainOn, session, setFrame, setPlaying, settings } from './lib/state.ts';
@@ -360,6 +362,39 @@ export default class WeatherPlugin implements PluginInstance {
         act.onEscape = undefined;
     }
 
+    /**
+     * Paces the first pass of Play (lib/pacing.ts). Keys are the tile requests of a frame
+     * without the token; a layer with no data in that frame (Clouds and Radar in the
+     * forecast) has none and costs nothing. Switched off with `pacing.enabled`, read live.
+     */
+    private makePacer(act: Activation): NonNullable<PlayerDeps['pace']> {
+        const pacer = new FramePacer({
+            keysOf: (frame) => {
+                const keys: string[] = [];
+                for (const slot of SLOT_ORDER) {
+                    try {
+                        const req = requestFor(slot, settings, session, frame);
+                        if (req) keys.push(JSON.stringify([req.layer, req.query]));
+                    } catch {
+                        // No valid request for this slot: it loads nothing.
+                    }
+                }
+                return keys;
+            },
+            tilesPerSlot: () => {
+                const el = (act.map as { getContainer?: () => HTMLElement } | undefined)?.getContainer?.();
+                return el ? estimateTiles(el.clientWidth, el.clientHeight, settings.tileSize) : FALLBACK_TILES;
+            },
+            now: () => Date.now(),
+        });
+        return {
+            delayMs: (frame) => (pacing.enabled ? pacer.delayMs(frame) : 0),
+            charge: (frame) => {
+                if (pacing.enabled) pacer.charge(frame);
+            },
+        };
+    }
+
     private makePlayer(act: Activation): Player {
         return new Player({
             range: () => playRange(rainOn(settings), settings.playForecast),
@@ -376,6 +411,7 @@ export default class WeatherPlugin implements PluginInstance {
                 session.preload = preload;
             },
             preloadReady: (key) => act.stack?.preloadReady(key) ?? false,
+            pace: this.makePacer(act),
             now: () => Date.now(),
             setTimer: (fn, ms) => setTimeout(fn, ms),
             clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
