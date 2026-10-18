@@ -29,6 +29,12 @@ export class FakeMap implements MapLike {
     layers: FakeLayer[] = [];
     sources = new Map<string, FakeSource>();
     counters: Counters = this.zero();
+    /** Every setPaintProperty call, in order. */
+    paintLog: { layer: string; name: string; value: unknown }[] = [];
+    /** Every setTiles call, in order. */
+    tilesLog: { source: string; tiles: string[] }[] = [];
+    /** Source ids isSourceLoaded() reports as loaded once loading control is on. */
+    loadedIds = new Set<string>();
 
     constructor(initial?: FakeLayer[]) {
         this.layers = (initial ?? FakeMap.initialLayers()).map((l) => ({ ...l }));
@@ -59,6 +65,7 @@ export class FakeMap implements MapLike {
             tiles: Array.isArray((spec as RasterSourceSpec).tiles) ? [...(spec as RasterSourceSpec).tiles] : [],
             setTiles: (tiles: string[]) => {
                 this.counters.setTiles++;
+                this.tilesLog.push({ source: id, tiles: [...tiles] });
                 src.tiles = [...tiles];
             },
         };
@@ -67,6 +74,16 @@ export class FakeMap implements MapLike {
 
     resetCounters(): void {
         this.counters = this.zero();
+        this.paintLog = [];
+        this.tilesLog = [];
+    }
+
+    /**
+     * Let the test decide which sources count as loaded (none until it says so).
+     * Without this call the map has no isSourceLoaded at all, like a map that cannot tell.
+     */
+    controlLoading(): void {
+        (this as unknown as { isSourceLoaded: (id: string) => boolean }).isSourceLoaded = (id) => this.loadedIds.has(id);
     }
 
     getStyle(): { layers: StyleLayerLike[] } {
@@ -148,6 +165,7 @@ export class FakeMap implements MapLike {
         const layer = this.getLayer(layerId);
         if (!layer) throw new Error(`Layer ${layerId} does not exist`);
         this.counters.setPaintProperty++;
+        this.paintLog.push({ layer: layerId, name, value });
         layer.paint = { ...layer.paint, [name]: value };
     }
 

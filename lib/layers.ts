@@ -4,12 +4,42 @@ import { rainOn } from './state.ts';
 import { ATTRIBUTION, ID_PREFIX } from './constants.ts';
 import { tileRequest } from './tile-url.ts';
 import { clampFrame, clock, frameBounds, holdSnapshot, rainFrame } from './time.ts';
+import { PreloadTracker } from './preload.ts';
+import type { MapEventLike } from './preload.ts';
 
 /** Bottom to top. */
 export const SLOT_ORDER: LayerSlot[] = ['clouds', 'precip-global', 'precip', 'radars'];
 
-export const layerId = (s: LayerSlot): string => `${ID_PREFIX}${s}`;
-export const sourceId = (s: LayerSlot): string => `${ID_PREFIX}${s}-src`;
+/**
+ * Every slot has up to two raster buffers: buffer 0 (`a`, the original ids) and buffer 1
+ * (`b`). Exactly one is visible. The other one is only there while a frame is preloaded.
+ */
+export type Buf = 0 | 1;
+
+/**
+ * Opacity of the buffer that loads the next frame. It stays `visibility: visible`, so
+ * MapLibre keeps requesting its tiles; it just draws nothing. The browser check
+ * (/tmp/weather-ui-check, H6) confirms MapLibre loads tiles at this opacity.
+ */
+export const HIDDEN_OPACITY = 0;
+
+/**
+ * Renders to wait after a swap before the buffer that was just hidden may be removed.
+ * Measured in a real MapLibre (browser check H6): removing a raster layer within about
+ * 80 ms of an opacity swap blanks the shown layer for 5 to 6 renders. Retargeting it with
+ * setTiles does not, so only a stop of the preload (which removes the buffer) has to wait.
+ */
+export const SETTLE_RENDERS = 12;
+
+export const bufferLayerId = (s: LayerSlot, buf: Buf): string => `${ID_PREFIX}${s}${buf === 1 ? '-b' : ''}`;
+export const bufferSourceId = (s: LayerSlot, buf: Buf): string => `${ID_PREFIX}${s}${buf === 1 ? '-b' : ''}-src`;
+
+/**
+ * Ids of the `a` buffer. One argument on purpose, so `slots.map(layerId)` cannot pass an
+ * array index as the buffer.
+ */
+export const layerId = (s: LayerSlot): string => bufferLayerId(s, 0);
+export const sourceId = (s: LayerSlot): string => bufferSourceId(s, 0);
 
 const MAX_ZOOM: Record<LayerSlot, number> = { clouds: 7, 'precip-global': 9, precip: 9, radars: 7 };
 
@@ -64,6 +94,8 @@ export interface DesiredLayer {
     opacity: number;
     tileSize: 256 | 512;
     maxzoom: number;
+    /** The frame to load into the hidden buffer. `key` identifies the frame. */
+    preload?: { tiles: string; key: number };
 }
 
 const ours = (id: string): boolean => id.startsWith(ID_PREFIX);
@@ -77,10 +109,18 @@ export function markerAnchor(style: StyleLike): string | undefined {
         ?? style.layers.find((l) => !ours(l.id) && l.type === 'symbol')?.id;
 }
 
-/** The nearest present layer of a higher slot, else the anchor. */
-export function planBeforeId(slot: LayerSlot, present: ReadonlySet<LayerSlot>, anchor: string | undefined): string | undefined {
+/**
+ * The lowest layer of the nearest present higher slot, else the anchor. `idOf` gives the
+ * id of a present slot's lowest layer (the `a` buffer, else the `b` buffer).
+ */
+export function planBeforeId(
+    slot: LayerSlot,
+    present: ReadonlySet<LayerSlot>,
+    anchor: string | undefined,
+    idOf: (s: LayerSlot) => string = layerId
+): string | undefined {
     for (let r = SLOT_ORDER.indexOf(slot) + 1; r < SLOT_ORDER.length; r++) {
-        if (present.has(SLOT_ORDER[r])) return layerId(SLOT_ORDER[r]);
+        if (present.has(SLOT_ORDER[r])) return idOf(SLOT_ORDER[r]);
     }
     return anchor;
 }
@@ -143,17 +183,25 @@ export function requestsFor(settings: WeatherSettings, session: TimelineSession,
     };
 }
 
+/** The next frame to load: its key and the tile URL per slot. */
+export interface PreloadUrls {
+    key: number;
+    tiles: Partial<Record<LayerSlot, string>>;
+}
+
 /**
  * One entry per slot. A slot is on when it is selected and has a tile URL.
  */
 export function computeDesired(
     settings: WeatherSettings,
     session: TimelineSession,
-    tileUrls: Partial<Record<LayerSlot, string>>
+    tileUrls: Partial<Record<LayerSlot, string>>,
+    preload?: PreloadUrls
 ): DesiredLayer[] {
     return SLOT_ORDER.map((slot) => {
         const tiles = tileUrls[slot];
-        return {
+        const next = preload?.tiles[slot];
+        const d: DesiredLayer = {
             slot,
             on: isSelected(slot, settings) && typeof tiles === 'string' && tiles !== '',
             tiles: tiles ?? '',
@@ -161,50 +209,92 @@ export function computeDesired(
             tileSize: settings.tileSize,
             maxzoom: MAX_ZOOM[slot],
         };
+        if (preload && typeof next === 'string' && next !== '') d.preload = { tiles: next, key: preload.key };
+        return d;
     });
 }
 
-interface Applied {
+interface BufferState {
     tiles: string;
+}
+
+interface Applied {
+    /** Which buffer is shown. */
+    visible: Buf;
+    /** Per buffer; null = not on the map. */
+    bufs: [BufferState | null, BufferState | null];
     opacity: number;
     tileSize: number;
     maxzoom: number;
+    /** The frame the preload serves, and where it loads: the hidden buffer, or the visible one when the URLs are equal. */
+    pre: { key: number; via: 'visible' | 'hidden' } | null;
+    /** The render count at the last swap (null = never swapped). */
+    swappedAt: number | null;
+    /** The hidden buffer is no longer needed and goes once the swap has settled. */
+    dropHidden: boolean;
 }
+
+const BUFFERS: readonly Buf[] = [0, 1];
 
 /**
  * Single writer of the weather layers on the map. sync() is declarative and idempotent.
+ *
+ * Double buffering: a slot can own a second raster source+layer pair (the hidden buffer)
+ * that loads the next frame at HIDDEN_OPACITY while the visible one is shown. The next
+ * sync swaps them with two setPaintProperty calls. Layers are never moved for that, and
+ * the pair always sits directly together in the order a (below) then b.
  */
 export class LayerStack {
     private map: MapLike;
     private applied = new Map<LayerSlot, Applied>();
+    private tracker = new PreloadTracker();
+    private warned = false;
+    private renders = 0;
 
     constructor(map: MapLike) {
         this.map = map;
     }
 
+    /** The lowest layer of the slot on the map: its `a` buffer, else its `b` buffer. */
+    lowestLayerId(slot: LayerSlot): string | undefined {
+        for (const buf of BUFFERS) {
+            if (this.map.getLayer(bufferLayerId(slot, buf))) return bufferLayerId(slot, buf);
+        }
+        return undefined;
+    }
+
     private presentSlots(except?: LayerSlot): Set<LayerSlot> {
         const present = new Set<LayerSlot>();
         for (const s of SLOT_ORDER) {
-            if (s !== except && this.map.getLayer(layerId(s))) present.add(s);
+            if (s !== except && this.lowestLayerId(s) !== undefined) present.add(s);
         }
         return present;
     }
 
-    private remove(slot: LayerSlot): void {
-        if (this.map.getLayer(layerId(slot))) this.map.removeLayer(layerId(slot));
-        if (this.map.getSource(sourceId(slot))) this.map.removeSource(sourceId(slot));
-        this.applied.delete(slot);
+    private removeBuffer(slot: LayerSlot, buf: Buf): void {
+        this.tracker.drop(bufferSourceId(slot, buf));
+        const a = this.applied.get(slot);
+        if (a) a.bufs[buf] = null;
+        if (this.map.getLayer(bufferLayerId(slot, buf))) this.map.removeLayer(bufferLayerId(slot, buf));
+        if (this.map.getSource(bufferSourceId(slot, buf))) this.map.removeSource(bufferSourceId(slot, buf));
     }
 
-    private add(d: DesiredLayer): void {
-        const present = this.presentSlots(d.slot);
-        const before = planBeforeId(d.slot, present, markerAnchor(this.map.getStyle()));
+    /** Remove both buffers of a slot. */
+    private remove(slot: LayerSlot): void {
+        try {
+            this.removeBuffer(slot, 1);
+        } finally {
+            this.removeBuffer(slot, 0);
+            this.applied.delete(slot);
+        }
+    }
 
-        if (this.map.getSource(sourceId(d.slot))) this.map.removeSource(sourceId(d.slot));
+    private create(d: DesiredLayer, buf: Buf, tiles: string, opacity: number, before: string | undefined): void {
+        if (this.map.getSource(bufferSourceId(d.slot, buf))) this.map.removeSource(bufferSourceId(d.slot, buf));
 
-        this.map.addSource(sourceId(d.slot), {
+        this.map.addSource(bufferSourceId(d.slot, buf), {
             type: 'raster',
-            tiles: [d.tiles],
+            tiles: [tiles],
             tileSize: d.tileSize,
             minzoom: 0,
             maxzoom: d.maxzoom,
@@ -212,17 +302,141 @@ export class LayerStack {
         });
 
         this.map.addLayer({
-            id: layerId(d.slot),
+            id: bufferLayerId(d.slot, buf),
             type: 'raster',
-            source: sourceId(d.slot),
+            source: bufferSourceId(d.slot, buf),
             paint: {
-                'raster-opacity': d.opacity,
+                'raster-opacity': opacity,
                 'raster-fade-duration': 0,
                 'raster-resampling': 'linear',
             },
         }, before);
+    }
 
-        this.applied.set(d.slot, { tiles: d.tiles, opacity: d.opacity, tileSize: d.tileSize, maxzoom: d.maxzoom });
+    /** Add the slot with its `a` buffer visible. */
+    private add(d: DesiredLayer): void {
+        const before = planBeforeId(d.slot, this.presentSlots(d.slot), markerAnchor(this.map.getStyle()), (s) => this.lowestLayerId(s) as string);
+
+        // A leftover `b` buffer would break the a-below-b order.
+        if (this.map.getLayer(bufferLayerId(d.slot, 1))) this.map.removeLayer(bufferLayerId(d.slot, 1));
+        if (this.map.getSource(bufferSourceId(d.slot, 1))) this.map.removeSource(bufferSourceId(d.slot, 1));
+
+        this.create(d, 0, d.tiles, d.opacity, before);
+        this.applied.set(d.slot, {
+            visible: 0,
+            bufs: [{ tiles: d.tiles }, null],
+            opacity: d.opacity,
+            tileSize: d.tileSize,
+            maxzoom: d.maxzoom,
+            pre: null,
+            swappedAt: null,
+            dropHidden: false,
+        });
+    }
+
+    /** Show the hidden buffer and hide the shown one. No layer moves. */
+    private swap(slot: LayerSlot, a: Applied, opacity: number): void {
+        const next = (1 - a.visible) as Buf;
+        this.map.setPaintProperty(bufferLayerId(slot, next), 'raster-opacity', opacity);
+        this.map.setPaintProperty(bufferLayerId(slot, a.visible), 'raster-opacity', HIDDEN_OPACITY);
+        a.visible = next;
+        a.opacity = opacity;
+        a.swappedAt = this.renders;
+        a.dropHidden = false;
+    }
+
+    private settled(a: Applied): boolean {
+        return a.swappedAt === null || this.renders - a.swappedAt >= SETTLE_RENDERS;
+    }
+
+    /** Remove the hidden buffer now, or as soon as the last swap has settled. */
+    private dropHidden(slot: LayerSlot, a: Applied): void {
+        const hidden = (1 - a.visible) as Buf;
+        if (!a.bufs[hidden]) {
+            a.dropHidden = false;
+            return;
+        }
+        if (!this.settled(a)) {
+            a.dropHidden = true;
+            return;
+        }
+        a.dropHidden = false;
+        this.removeBuffer(slot, hidden);
+    }
+
+    /** Create the hidden buffer next to the visible one: `b` above `a`. */
+    private createHidden(d: DesiredLayer, a: Applied, tiles: string): void {
+        const hidden = (1 - a.visible) as Buf;
+        const before = hidden === 1
+            ? planBeforeId(d.slot, this.presentSlots(d.slot), markerAnchor(this.map.getStyle()), (s) => this.lowestLayerId(s) as string)
+            : bufferLayerId(d.slot, 1);
+        this.create(d, hidden, tiles, HIDDEN_OPACITY, before);
+        a.bufs[hidden] = { tiles };
+    }
+
+    /** Load (or stop loading) the next frame into the hidden buffer. */
+    private syncPreload(d: DesiredLayer): void {
+        const a = this.applied.get(d.slot);
+        if (!a) return;
+        const hidden = (1 - a.visible) as Buf;
+        const pre = d.preload;
+
+        try {
+            if (!pre) {
+                this.dropHidden(d.slot, a);
+                a.pre = null;
+                return;
+            }
+
+            if (pre.tiles === a.bufs[a.visible]?.tiles) {
+                // Nothing new to load, the shown frame already is that frame.
+                this.dropHidden(d.slot, a);
+                a.pre = { key: pre.key, via: 'visible' };
+                return;
+            }
+
+            a.dropHidden = false;
+
+            const have = a.bufs[hidden];
+            if (!have) {
+                this.createHidden(d, a, pre.tiles);
+                this.tracker.arm(bufferSourceId(d.slot, hidden), pre.key);
+            } else if (have.tiles !== pre.tiles) {
+                const src = this.map.getSource(bufferSourceId(d.slot, hidden)) as { setTiles?: (tiles: string[]) => unknown } | undefined;
+                if (!src || typeof src.setTiles !== 'function') throw new Error('hidden buffer cannot change tiles');
+                src.setTiles([pre.tiles]);
+                have.tiles = pre.tiles;
+                this.tracker.arm(bufferSourceId(d.slot, hidden), pre.key);
+            } else {
+                this.tracker.retarget(bufferSourceId(d.slot, hidden), pre.key);
+            }
+            a.pre = { key: pre.key, via: 'hidden' };
+        } catch (err) {
+            // Preloading is an optimisation: give the buffer up, the visible frame is untouched.
+            if (!this.warned) {
+                this.warned = true;
+                console.warn('[weather] Could not preload the next frame', err);
+            }
+            try {
+                this.removeBuffer(d.slot, hidden);
+            } catch {
+                // Already gone.
+            }
+            a.pre = null;
+        }
+    }
+
+    /** Forget a hidden buffer that is partly or fully gone from the map. */
+    private repairHidden(slot: LayerSlot, a: Applied): void {
+        const hidden = (1 - a.visible) as Buf;
+        if (!a.bufs[hidden]) return;
+        if (this.map.getLayer(bufferLayerId(slot, hidden)) && this.map.getSource(bufferSourceId(slot, hidden))) return;
+        try {
+            this.removeBuffer(slot, hidden);
+        } catch {
+            a.bufs[hidden] = null;
+        }
+        a.pre = null;
     }
 
     sync(desired: DesiredLayer[]): void {
@@ -238,36 +452,57 @@ export class LayerStack {
             if (!d || !d.on) continue;
 
             const prev = this.applied.get(slot);
-            const exists = Boolean(this.map.getLayer(layerId(slot)));
+            const exists = Boolean(prev && this.map.getLayer(bufferLayerId(slot, prev.visible)));
 
             if (!exists || !prev) {
-                if (exists) this.remove(slot);
+                if (this.lowestLayerId(slot) !== undefined) this.remove(slot);
                 this.add(d);
+                this.syncPreload(d);
                 continue;
             }
 
             if (prev.tileSize !== d.tileSize || prev.maxzoom !== d.maxzoom) {
                 this.remove(slot);
                 this.add(d);
+                this.syncPreload(d);
                 continue;
             }
 
-            if (prev.tiles !== d.tiles) {
-                const src = this.map.getSource(sourceId(slot)) as { setTiles?: (tiles: string[]) => unknown } | undefined;
-                if (src && typeof src.setTiles === 'function') {
-                    src.setTiles([d.tiles]);
-                    prev.tiles = d.tiles;
+            this.repairHidden(slot, prev);
+
+            const shown = prev.bufs[prev.visible];
+            if (shown && shown.tiles !== d.tiles) {
+                const hidden = prev.bufs[(1 - prev.visible) as Buf];
+                if (hidden && hidden.tiles === d.tiles) {
+                    try {
+                        this.swap(slot, prev, d.opacity);
+                    } catch (err) {
+                        console.warn('[weather] Could not swap the preloaded frame, reloading it', err);
+                        this.remove(slot);
+                        this.add(d);
+                        this.syncPreload(d);
+                        continue;
+                    }
                 } else {
-                    this.remove(slot);
-                    this.add(d);
-                    continue;
+                    const src = this.map.getSource(bufferSourceId(slot, prev.visible)) as { setTiles?: (tiles: string[]) => unknown } | undefined;
+                    if (src && typeof src.setTiles === 'function') {
+                        src.setTiles([d.tiles]);
+                        shown.tiles = d.tiles;
+                    } else {
+                        this.remove(slot);
+                        this.add(d);
+                        this.syncPreload(d);
+                        continue;
+                    }
                 }
             }
 
             if (prev.opacity !== d.opacity) {
-                this.map.setPaintProperty(layerId(slot), 'raster-opacity', d.opacity);
+                this.map.setPaintProperty(bufferLayerId(slot, prev.visible), 'raster-opacity', d.opacity);
                 prev.opacity = d.opacity;
             }
+
+            this.syncPreload(d);
         }
 
         this.ensureOrder();
@@ -276,26 +511,36 @@ export class LayerStack {
     /** Remove everything, tolerating a map that already lost its layers. */
     removeAll(): void {
         for (const slot of [...SLOT_ORDER].reverse()) {
-            try {
-                this.remove(slot);
-            } catch {
-                this.applied.delete(slot);
+            for (const buf of [1, 0] as const) {
+                try {
+                    this.removeBuffer(slot, buf);
+                } catch {
+                    // The map lost it already.
+                }
             }
+            this.applied.delete(slot);
         }
+        this.tracker.clear();
     }
 
     /**
-     * Restore clouds < rain < radar and "below the marker anchor".
-     * A correct stack makes no moveLayer call. Returns true when layers were moved.
+     * Restore clouds < rain < radar and "below the marker anchor", with the buffers of a
+     * slot in the order a, b. A correct stack makes no moveLayer call. Returns true when
+     * layers were moved.
      */
     ensureOrder(): boolean {
         const style = this.map.getStyle();
         const ids = style.layers.map((l) => l.id);
-        const present = SLOT_ORDER.filter((s) => ids.includes(layerId(s)));
+        const present: string[] = [];
+        for (const slot of SLOT_ORDER) {
+            for (const buf of BUFFERS) {
+                if (ids.includes(bufferLayerId(slot, buf))) present.push(bufferLayerId(slot, buf));
+            }
+        }
         if (present.length === 0) return false;
 
         const anchor = markerAnchor(style);
-        const positions = present.map((s) => ids.indexOf(layerId(s)));
+        const positions = present.map((id) => ids.indexOf(id));
         const ordered = positions.every((p, i) => i === 0 || positions[i - 1] < p);
         const anchorIdx = anchor === undefined ? -1 : ids.indexOf(anchor);
         const below = anchorIdx < 0 || positions[positions.length - 1] < anchorIdx;
@@ -303,21 +548,66 @@ export class LayerStack {
         if (ordered && below) return false;
 
         let before = anchor;
-        for (const slot of [...present].reverse()) {
-            this.map.moveLayer(layerId(slot), before);
-            before = layerId(slot);
+        for (const id of [...present].reverse()) {
+            this.map.moveLayer(id, before);
+            before = id;
         }
         return true;
     }
 
-    /** True when every weather source on the map reports its tiles as loaded. */
+    /** True when every weather source on the map (both buffers) reports its tiles as loaded. */
     sourcesLoaded(): boolean {
         const isLoaded = this.map.isSourceLoaded;
         if (typeof isLoaded !== 'function') return true;
 
         return SLOT_ORDER
-            .filter((s) => this.map.getSource(sourceId(s)))
-            .every((s) => isLoaded.call(this.map, sourceId(s)));
+            .flatMap((s) => BUFFERS.map((b) => bufferSourceId(s, b)))
+            .filter((id) => this.map.getSource(id))
+            .every((id) => isLoaded.call(this.map, id));
+    }
+
+    /** Feed the MapLibre `sourcedata` and `render` events to the preload tracker. */
+    noteMapEvent(type: string, event?: MapEventLike): void {
+        this.tracker.note(type, event);
+        if (type !== 'render') return;
+        this.renders++;
+        for (const [slot, a] of this.applied) {
+            if (!a.dropHidden || !this.settled(a)) continue;
+            try {
+                this.dropHidden(slot, a);
+            } catch {
+                a.dropHidden = false;
+            }
+        }
+    }
+
+    private loaded(id: string): boolean {
+        const isLoaded = this.map.isSourceLoaded;
+        if (typeof isLoaded !== 'function') return true;
+        try {
+            return isLoaded.call(this.map, id);
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * True when the frame `key` is loaded into the hidden buffer of every slot that is on
+     * (a slot whose next frame is the shown frame needs nothing). False with no slot on.
+     */
+    preloadReady(key: number): boolean {
+        let any = false;
+        for (const slot of SLOT_ORDER) {
+            const a = this.applied.get(slot);
+            if (!a) continue;
+            if (!a.pre || a.pre.key !== key) return false;
+            if (a.pre.via === 'hidden') {
+                const id = bufferSourceId(slot, (1 - a.visible) as Buf);
+                if (!this.tracker.ready(id, key, () => this.loaded(id))) return false;
+            }
+            any = true;
+        }
+        return any;
     }
 
     /** Layer ids currently on the map, bottom to top. */

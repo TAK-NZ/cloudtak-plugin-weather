@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-    SLOT_ORDER, layerId, sourceId, markerAnchor, planBeforeId, requestsFor, requestFor, computeDesired, LayerStack,
+    SLOT_ORDER, HIDDEN_OPACITY, SETTLE_RENDERS, layerId, sourceId, bufferLayerId, bufferSourceId, markerAnchor, planBeforeId, requestsFor, requestFor,
+    computeDesired, LayerStack,
     type DesiredLayer, type RasterLayerSpec, type RasterSourceSpec,
 } from '../lib/layers.ts';
 import { buildTileTemplate } from '../lib/relay-client.ts';
@@ -756,6 +757,697 @@ describe('sourcesLoaded', () => {
         (map as unknown as { isSourceLoaded: (id: string) => boolean }).isSourceLoaded = (id) => loaded.has(id);
         expect(stack.sourcesLoaded()).toBe(false);
         loaded.add(sourceId('precip'));
+        expect(stack.sourcesLoaded()).toBe(true);
+    });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Double buffering
+// ---------------------------------------------------------------------------------------------
+
+type Buf = 0 | 1;
+const BUFS: readonly Buf[] = [0, 1];
+
+interface Frames {
+    /** The shown frame. */
+    f: number;
+    /** The frame the hidden buffers load, or null. */
+    pre: number | null;
+}
+
+function urlsAt(s: WeatherSettings, sess: Sess, frame: number): Partial<Record<LayerSlot, string>> {
+    const reqs = requestsFor(s, sess, frame);
+    const out: Partial<Record<LayerSlot, string>> = {};
+    for (const slot of SLOT_ORDER) {
+        const r = reqs[slot];
+        if (r) out[slot] = buildTileTemplate(ORIGIN, r, 'TOKEN');
+    }
+    return out;
+}
+
+function desiredAt(s: WeatherSettings, sess: Sess, fr: Frames): DesiredLayer[] {
+    const shown = { ...sess, frame: fr.f };
+    return computeDesired(s, shown, urlsAt(s, shown, fr.f), fr.pre === null ? undefined : { key: fr.pre, tiles: urlsAt(s, shown, fr.pre) });
+}
+
+/** Let MapLibre render long enough for a swap to settle. */
+function settle(stack: LayerStack): void {
+    for (let i = 0; i < SETTLE_RENDERS; i++) stack.noteMapEvent('render');
+}
+
+/** Sync only: no render events reach the stack. */
+function syncRaw(stack: LayerStack, s: WeatherSettings, sess: Sess, fr: Frames): void {
+    stack.sync(desiredAt(s, sess, fr));
+}
+
+/** Sync, then let the swap settle, so a stopped preload is gone again. */
+function syncAt(stack: LayerStack, s: WeatherSettings, sess: Sess, fr: Frames): void {
+    stack.sync(desiredAt(s, sess, fr));
+    settle(stack);
+}
+
+/** Invariants I1-I9 for a stack with buffers. */
+function assertBuffers(map: FakeMap, s: WeatherSettings, sess: Sess, fr: Frames, foreignExpected: string[] = FOREIGN): void {
+    const ids = map.layers.map((l) => l.id);
+    const want = selected(s);
+    const shown = { ...sess, frame: fr.f };
+    const urls = urlsAt(s, shown, fr.f);
+    const preUrls = fr.pre === null ? {} : urlsAt(s, shown, fr.pre);
+
+    // I2: flattened order clouds < global < regional < radars with a below b, and nothing unknown
+    const flat: string[] = [];
+    for (const slot of SLOT_ORDER) {
+        for (const buf of BUFS) if (ids.includes(bufferLayerId(slot, buf))) flat.push(bufferLayerId(slot, buf));
+    }
+    expect(ids.filter((id) => id.startsWith(ID_PREFIX))).toEqual(flat);
+
+    // I3: below the marker anchor
+    const anchor = anchorOf(map);
+    if (anchor !== undefined) for (const id of flat) expect(ids.indexOf(id)).toBeLessThan(ids.indexOf(anchor));
+
+    const sources: string[] = [];
+    for (const slot of SLOT_ORDER) {
+        const present = BUFS.filter((b) => ids.includes(bufferLayerId(slot, b)));
+        if (!want.has(slot)) {
+            expect(present).toEqual([]);
+            continue;
+        }
+        // I7: one or two buffers; a directly below b
+        expect(present.length).toBeGreaterThanOrEqual(1);
+        if (present.length === 2) expect(ids.indexOf(bufferLayerId(slot, 1))).toBe(ids.indexOf(bufferLayerId(slot, 0)) + 1);
+
+        // I8: the visible buffer has the user opacity, the hidden one HIDDEN_OPACITY
+        const opacity = (b: Buf): unknown => map.getLayer(bufferLayerId(slot, b))?.paint?.['raster-opacity'];
+        const visible = present.filter((b) => opacity(b) === s.opacity[slot]);
+        const hidden = present.filter((b) => opacity(b) === HIDDEN_OPACITY);
+        expect(visible.length).toBe(1);
+        expect(visible.length + hidden.length).toBe(present.length);
+
+        // I5: the visible buffer shows the frame, the hidden one the preload (and only when it differs)
+        expect(map.getSource(bufferSourceId(slot, visible[0]))?.tiles).toEqual([urls[slot]]);
+        if (fr.pre !== null && preUrls[slot] !== urls[slot]) {
+            expect(hidden.length).toBe(1);
+            expect(map.getSource(bufferSourceId(slot, hidden[0]))?.tiles).toEqual([preUrls[slot]]);
+        } else {
+            expect(hidden.length).toBe(0);
+        }
+
+        for (const b of present) {
+            expect(map.getLayer(bufferLayerId(slot, b))?.source).toBe(bufferSourceId(slot, b));
+            sources.push(bufferSourceId(slot, b));
+        }
+    }
+
+    // I4/I9: unique ids; every source has a layer, every layer a source; no orphans
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set([...map.sources.keys()].filter((k) => k.startsWith(ID_PREFIX)))).toEqual(new Set(sources));
+
+    // I6: foreign layers keep their order
+    expect(ids.filter((id) => !id.startsWith(ID_PREFIX))).toEqual(foreignExpected);
+}
+
+function freshBuf(): ReturnType<typeof fresh> & { fr: Frames } {
+    return { ...fresh(), fr: { f: -8, pre: null } };
+}
+
+describe('buffer ids', () => {
+    it('layerId and sourceId give the a buffer; bufferLayerId gives both', () => {
+        expect(layerId('precip')).toBe('taknz-wx-precip');
+        expect(sourceId('precip')).toBe('taknz-wx-precip-src');
+        expect(bufferLayerId('precip', 0)).toBe('taknz-wx-precip');
+        expect(bufferLayerId('precip', 1)).toBe('taknz-wx-precip-b');
+        expect(bufferSourceId('precip-global', 1)).toBe('taknz-wx-precip-global-b-src');
+    });
+    it('slots.map(layerId) is not confused by the array index', () => {
+        expect(SLOT_ORDER.map(layerId)).toEqual(SLOT_ORDER.map((slot) => bufferLayerId(slot, 0)));
+    });
+    it('the hidden buffer is invisible but not hidden from MapLibre', () => {
+        expect(HIDDEN_OPACITY).toBe(0);
+    });
+});
+
+describe('Case I: double buffering', () => {
+    it('keeps invariants I1-I9 and never calls moveLayer (4680 sequences over 8 events)', () => {
+        type E = 'clouds' | 'radars' | 'regional' | 'global' | 'start' | 'advance' | 'stop' | 'jump';
+        const events: E[] = ['clouds', 'radars', 'regional', 'global', 'start', 'advance', 'stop', 'jump'];
+        let total = 0;
+
+        const run = (seq: E[]): void => {
+            const { map, stack, s, sess, fr } = freshBuf();
+            for (const ev of seq) {
+                if (ev === 'clouds' || ev === 'radars' || ev === 'regional' || ev === 'global') apply(s, ev);
+                else if (ev === 'start') fr.pre = fr.f + 1;
+                else if (ev === 'advance') {
+                    fr.f += 1;
+                    fr.pre = fr.f + 1;
+                } else if (ev === 'stop') fr.pre = null;
+                else {
+                    fr.f += 3;
+                    if (fr.pre !== null) fr.pre = fr.f + 1;
+                }
+                syncAt(stack, s, sess, fr);
+                assertBuffers(map, s, sess, fr);
+            }
+            expect(map.counters.moveLayer).toBe(0);
+            stack.removeAll();
+            expect(map.layers.map((l) => l.id)).toEqual(FOREIGN);
+            expect([...map.sources.keys()].filter((k) => k.startsWith(ID_PREFIX))).toEqual([]);
+            total++;
+        };
+
+        let level: E[][] = [[]];
+        for (let len = 1; len <= 4; len++) {
+            level = level.flatMap((seq) => events.map((e) => [...seq, e]));
+            level.forEach(run);
+        }
+        expect(total).toBe(4680);
+    });
+
+    it('all 16 subsets, preload off then on then advanced six times', () => {
+        for (let mask = 0; mask < 16; mask++) {
+            const { map, stack, s, sess, fr } = freshBuf();
+            for (const ev of MEMBERS.filter((_, i) => mask & (1 << i))) apply(s, ev);
+            syncAt(stack, s, sess, fr);
+            assertBuffers(map, s, sess, fr);
+            const n = selected(s).size;
+            expect(map.layers.filter((l) => l.id.startsWith(ID_PREFIX)).length).toBe(n);
+
+            fr.pre = fr.f + 1;
+            syncAt(stack, s, sess, fr);
+            assertBuffers(map, s, sess, fr);
+            expect(map.layers.filter((l) => l.id.startsWith(ID_PREFIX)).length).toBe(2 * n);
+
+            for (let i = 0; i < 6; i++) {
+                fr.f += 1;
+                fr.pre = fr.f + 1;
+                syncAt(stack, s, sess, fr);
+                assertBuffers(map, s, sess, fr);
+            }
+            expect(map.counters.moveLayer).toBe(0);
+        }
+    });
+
+    it('creates the hidden buffer above the visible one with the same options, at HIDDEN_OPACITY', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        s.tileSize = 256;
+        syncAt(stack, s, sess, fr);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        const a = map.getSource('taknz-wx-precip-src')?.spec as RasterSourceSpec;
+        const b = map.getSource('taknz-wx-precip-b-src')?.spec as RasterSourceSpec;
+        expect({ ...b, tiles: a.tiles }).toEqual(a);
+        expect(b.attribution).toBe(ATTRIBUTION);
+        expect(map.getLayer('taknz-wx-precip-b')?.paint).toEqual({ 'raster-opacity': 0, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
+        const ids = map.layers.map((l) => l.id);
+        expect(ids.indexOf('taknz-wx-precip-b')).toBe(ids.indexOf('taknz-wx-precip') + 1);
+        expect(ids[ids.indexOf('taknz-wx-precip-b') + 1]).toBe('mf-polygons');
+    });
+
+    it('a frame step swaps with exactly two setPaintProperty calls, one setTiles on the hidden buffer and no add/remove/move', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        s.clouds = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+
+        fr.f = -7;
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 0, removeSource: 0, moveLayer: 0, setTiles: 2, setPaintProperty: 4 });
+        // the new frame becomes visible, the old one is hidden
+        expect(map.paintLog.filter((p) => p.layer === 'taknz-wx-precip-b')).toEqual([{ layer: 'taknz-wx-precip-b', name: 'raster-opacity', value: 0.7 }]);
+        expect(map.paintLog.filter((p) => p.layer === 'taknz-wx-precip')).toEqual([{ layer: 'taknz-wx-precip', name: 'raster-opacity', value: HIDDEN_OPACITY }]);
+        // only the hidden source (the old visible one) was retargeted
+        expect(map.tilesLog.map((t) => t.source).sort()).toEqual(['taknz-wx-clouds-src', 'taknz-wx-precip-src']);
+    });
+
+    it('seven swaps in a row keep adjacency, ids and the opacity roles', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = fr.f + 1;
+        syncAt(stack, s, sess, fr);
+        const ids = map.layers.map((l) => l.id);
+        for (let i = 0; i < 7; i++) {
+            fr.f += 1;
+            fr.pre = fr.f + 1;
+            syncAt(stack, s, sess, fr);
+            assertBuffers(map, s, sess, fr);
+            expect(map.layers.map((l) => l.id)).toEqual(ids);
+        }
+        expect(map.counters.moveLayer).toBe(0);
+        expect(map.counters.addLayer).toBe(8);
+    });
+
+    it('stopping the preload removes the hidden buffer (layer then source) and keeps the shown frame', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        fr.f = -7;
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+        fr.pre = null;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 4, removeSource: 4, moveLayer: 0, setTiles: 0, setPaintProperty: 0 });
+        // the `a` buffers were hidden after the swap, so the `b` ones remain: they keep their position
+        expect(stack.lowestLayerId('precip')).toBe('taknz-wx-precip-b');
+        expect(map.layers.filter((l) => l.id.startsWith(ID_PREFIX)).map((l) => l.id)).toEqual([
+            'taknz-wx-clouds-b', 'taknz-wx-precip-global-b', 'taknz-wx-precip-b', 'taknz-wx-radars-b',
+        ]);
+    });
+
+    it('with only a b buffer left, later layers still go in the right place and the next preload goes below it', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        fr.f = -7;
+        fr.pre = null;
+        syncAt(stack, s, sess, fr);
+        expect(map.layers.map((l) => l.id).filter((id) => id.startsWith(ID_PREFIX))).toEqual(['taknz-wx-precip-b']);
+        s.clouds = true;
+        s.radars = true;
+        s.precipGlobal = true;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        const ids = map.layers.map((l) => l.id);
+        expect(ids.indexOf('taknz-wx-precip')).toBe(ids.indexOf('taknz-wx-precip-b') - 1);
+        expect(map.counters.moveLayer).toBe(0);
+    });
+
+    it('removing a slot removes both of its buffers and their sources', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        s.precipRegional = false;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.getLayer('taknz-wx-precip')).toBeUndefined();
+        expect(map.getLayer('taknz-wx-precip-b')).toBeUndefined();
+        expect(map.getSource('taknz-wx-precip-src')).toBeUndefined();
+        expect(map.getSource('taknz-wx-precip-b-src')).toBeUndefined();
+        for (const ev of MEMBERS) if (ev !== 'regional') apply(s, ev);
+        syncAt(stack, s, sess, fr);
+        expect([...map.sources.keys()].filter((k) => k.startsWith(ID_PREFIX))).toEqual([]);
+    });
+
+    it('a palette change while preloading retargets both buffers without adding or removing anything', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        s.precipGlobal = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+        s.palette.precip = '7';
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 0, removeSource: 0, moveLayer: 0, setTiles: 4, setPaintProperty: 0 });
+        expect(map.getSource('taknz-wx-precip-b-src')?.tiles[0]).toContain('color=7');
+    });
+
+    it('switching Regional off and Global on while preloading touches only those two slots', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.clouds = true;
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+        s.precipRegional = false;
+        s.precipGlobal = true;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.counters).toEqual({ addSource: 2, addLayer: 2, removeLayer: 2, removeSource: 2, moveLayer: 0, setTiles: 0, setPaintProperty: 0 });
+    });
+
+    it('a tileSize change re-creates both buffers in place', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        const before = map.layers.map((l) => l.id);
+        map.resetCounters();
+        s.tileSize = 256;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.layers.map((l) => l.id)).toEqual(before);
+        expect(map.counters.addLayer).toBe(8);
+        expect(map.counters.removeLayer).toBe(8);
+        expect(map.counters.moveLayer).toBe(0);
+        expect((map.getSource('taknz-wx-precip-b-src')?.spec as RasterSourceSpec).tileSize).toBe(256);
+    });
+
+    it('syncing an unchanged state with a preload makes no map call at all', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        fr.f = -7;
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+        syncAt(stack, s, sess, fr);
+        expect(map.counters).toEqual({ addSource: 0, addLayer: 0, removeLayer: 0, removeSource: 0, moveLayer: 0, setTiles: 0, setPaintProperty: 0 });
+    });
+
+    it('an opacity change touches only the visible buffer', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.resetCounters();
+        s.opacity.precip = 0.4;
+        syncAt(stack, s, sess, fr);
+        expect(map.paintLog).toEqual([{ layer: 'taknz-wx-precip', name: 'raster-opacity', value: 0.4 }]);
+        expect(map.getLayer('taknz-wx-precip-b')?.paint?.['raster-opacity']).toBe(HIDDEN_OPACITY);
+        // and the swap afterwards shows the new opacity
+        fr.f = -7;
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        expect(map.getLayer('taknz-wx-precip-b')?.paint?.['raster-opacity']).toBe(0.4);
+    });
+
+    it('frames that repeat (clouds and radar after Now) load nothing into a hidden buffer', () => {
+        const { map, stack, s, sess } = freshBuf();
+        s.clouds = true;
+        s.radars = true;
+        s.precipRegional = true;
+        const fr: Frames = { f: 0, pre: 1 };
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(map.getLayer('taknz-wx-clouds-b')).toBeUndefined();
+        expect(map.getLayer('taknz-wx-radars-b')).toBeUndefined();
+        expect(map.getLayer('taknz-wx-precip-b')).toBeDefined();
+    });
+});
+
+describe('Case I: removing the hidden buffer waits for a swap to settle', () => {
+    function swapped(): ReturnType<typeof freshBuf> {
+        const f = freshBuf();
+        f.s.precipRegional = true;
+        f.fr.pre = -7;
+        syncAt(f.stack, f.s, f.sess, f.fr);
+        f.fr.f = -7;
+        f.fr.pre = -6;
+        syncRaw(f.stack, f.s, f.sess, f.fr);
+        return f;
+    }
+
+    it('stopping right after a swap keeps the buffer until enough renders have passed, then removes it', () => {
+        const { map, stack, s, sess, fr } = swapped();
+        fr.pre = null;
+        map.resetCounters();
+        stack.sync(desiredAt(s, sess, fr));
+        expect(map.counters.removeLayer).toBe(0);
+        expect(map.getLayer('taknz-wx-precip')).toBeDefined();
+        expect(map.getLayer('taknz-wx-precip-b')).toBeDefined();
+        expect(stack.preloadReady(-6)).toBe(false);
+        for (let i = 0; i < SETTLE_RENDERS - 1; i++) stack.noteMapEvent('render');
+        expect(map.counters.removeLayer).toBe(0);
+        stack.noteMapEvent('render');
+        expect(map.counters).toMatchObject({ removeLayer: 1, removeSource: 1, moveLayer: 0 });
+        assertBuffers(map, s, sess, fr);
+        // and it stays gone
+        stack.noteMapEvent('render');
+        expect(map.counters.removeLayer).toBe(1);
+    });
+
+    it('a later sync removes it as well once enough renders have passed', () => {
+        const { map, stack, s, sess, fr } = swapped();
+        fr.pre = null;
+        stack.sync(desiredAt(s, sess, fr));
+        for (let i = 0; i < SETTLE_RENDERS; i++) stack.noteMapEvent('render');
+        expect(map.getLayer('taknz-wx-precip')).toBeUndefined();
+    });
+
+    it('a new preload during the wait reuses the buffer and cancels the removal', () => {
+        const { map, stack, s, sess, fr } = swapped();
+        fr.pre = null;
+        stack.sync(desiredAt(s, sess, fr));
+        fr.pre = -5;
+        map.resetCounters();
+        stack.sync(desiredAt(s, sess, fr));
+        expect(map.counters).toMatchObject({ addLayer: 0, removeLayer: 0, setTiles: 1 });
+        settle(stack);
+        assertBuffers(map, s, sess, fr);
+        expect(map.getLayer('taknz-wx-precip')).toBeDefined();
+    });
+
+    it('a stop without a recent swap removes the buffer at once', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        fr.pre = null;
+        map.resetCounters();
+        stack.sync(desiredAt(s, sess, fr));
+        expect(map.counters).toMatchObject({ removeLayer: 1, removeSource: 1 });
+    });
+
+    it('removeAll and a slot switched off do not wait', () => {
+        const { map, stack, s, sess, fr } = swapped();
+        s.precipRegional = false;
+        stack.sync(desiredAt(s, sess, fr));
+        expect(map.layers.some((l) => l.id.startsWith('taknz-wx-'))).toBe(false);
+        const g = swapped();
+        g.fr.pre = null;
+        g.stack.sync(desiredAt(g.s, g.sess, g.fr));
+        g.stack.removeAll();
+        expect(g.map.layers.map((l) => l.id)).toEqual(FOREIGN);
+        expect([...g.map.sources.keys()].filter((k) => k.startsWith('taknz-wx-'))).toEqual([]);
+    });
+});
+
+describe('Case I: foreign interference with buffer pairs', () => {
+    function allPaired(): ReturnType<typeof freshBuf> {
+        const f = freshBuf();
+        for (const ev of MEMBERS) apply(f.s, ev);
+        f.fr.pre = f.fr.f + 1;
+        syncAt(f.stack, f.s, f.sess, f.fr);
+        return f;
+    }
+
+    it('is a no-op when the pairs are in place', () => {
+        const f = allPaired();
+        f.map.resetCounters();
+        expect(f.stack.ensureOrder()).toBe(false);
+        expect(f.map.counters.moveLayer).toBe(0);
+    });
+
+    it('repairs moved pairs to the flattened order, below the anchor, with a below b', () => {
+        const f = allPaired();
+        f.map.moveForeign('taknz-wx-radars-b');
+        f.map.moveForeign('taknz-wx-clouds');
+        f.map.moveForeign('taknz-wx-precip-b');
+        expect(f.stack.ensureOrder()).toBe(true);
+        assertBuffers(f.map, f.s, f.sess, f.fr);
+        f.map.resetCounters();
+        expect(f.stack.ensureOrder()).toBe(false);
+        expect(f.map.counters.moveLayer).toBe(0);
+    });
+
+    it('repairs a foreign layer inserted between the pairs and the anchor', () => {
+        const f = allPaired();
+        f.map.addForeign({ id: 'intruder', type: 'raster', source: 'intr' }, 'mf-polygons');
+        f.stack.ensureOrder();
+        assertBuffers(f.map, f.s, f.sess, f.fr, [...FOREIGN.slice(0, 3), 'intruder', ...FOREIGN.slice(3)]);
+    });
+
+    it('Map Features removed and re-added at the top keep the pairs below them', () => {
+        const f = allPaired();
+        f.map.removeForeign('mf-polygons');
+        f.map.removeForeign('mf-lines');
+        f.map.addForeign({ id: 'mf-polygons', type: 'fill', source: '-1' });
+        f.map.addForeign({ id: 'mf-lines', type: 'line', source: '-1' });
+        f.stack.ensureOrder();
+        assertBuffers(f.map, f.s, f.sess, f.fr, ['background', 'basemap', 'overlay-7', 'labels', 'mf-polygons', 'mf-lines']);
+        f.map.resetCounters();
+        expect(f.stack.ensureOrder()).toBe(false);
+    });
+});
+
+describe('Case I: map loss and failures with buffers', () => {
+    it('removeAll tolerates a map that lost its layers, pairs included, and leaves nothing behind', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.dropPrefixed(ID_PREFIX);
+        expect(() => stack.removeAll()).not.toThrow();
+        expect(stack.stackIds()).toEqual([]);
+        expect(() => stack.removeAll()).not.toThrow();
+    });
+
+    it('removeAll removes both buffers and every source', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        stack.removeAll();
+        expect(map.layers.map((l) => l.id)).toEqual(FOREIGN);
+        expect([...map.sources.keys()].filter((k) => k.startsWith(ID_PREFIX))).toEqual([]);
+    });
+
+    it('a hidden buffer that vanished from the map is created again', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.removeLayer('taknz-wx-precip-b');
+        map.removeSource('taknz-wx-precip-b-src');
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+    });
+
+    it('sync after the map lost everything re-adds the visible buffer and the preload', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        for (const ev of MEMBERS) apply(s, ev);
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.dropPrefixed(ID_PREFIX);
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+    });
+
+    it('a failing hidden buffer is given up: the shown frame stays and the next sync tries again', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        syncAt(stack, s, sess, fr);
+        const add = map.addLayer.bind(map);
+        let fail = true;
+        map.addLayer = (spec, before) => {
+            if (fail && spec.id.endsWith('-b')) throw new Error('boom');
+            add(spec, before);
+        };
+        fr.pre = -7;
+        expect(() => syncAt(stack, s, sess, fr)).not.toThrow();
+        expect(map.getLayer('taknz-wx-precip')).toBeDefined();
+        expect(map.getLayer('taknz-wx-precip-b')).toBeUndefined();
+        expect(map.getSource('taknz-wx-precip-b-src')).toBeUndefined();
+        expect(stack.preloadReady(-7)).toBe(false);
+        fail = false;
+        syncAt(stack, s, sess, fr);
+        assertBuffers(map, s, sess, fr);
+        expect(warn).toHaveBeenCalledTimes(1);
+        warn.mockRestore();
+    });
+
+    it('a failing swap re-creates the slot at the wanted frame', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        const paint = map.setPaintProperty.bind(map);
+        map.setPaintProperty = () => {
+            map.setPaintProperty = paint;
+            throw new Error('boom');
+        };
+        fr.f = -7;
+        fr.pre = -6;
+        expect(() => syncAt(stack, s, sess, fr)).not.toThrow();
+        assertBuffers(map, s, sess, fr);
+        warn.mockRestore();
+    });
+});
+
+describe('preloadReady and noteMapEvent', () => {
+    function setup(): ReturnType<typeof freshBuf> {
+        const f = freshBuf();
+        f.map.controlLoading();
+        f.s.precipRegional = true;
+        f.s.clouds = true;
+        return f;
+    }
+
+    it('is false without a preload or without a layer', () => {
+        const { stack, s, sess, fr } = setup();
+        expect(stack.preloadReady(-7)).toBe(false);
+        syncRaw(stack, s, sess, fr);
+        expect(stack.preloadReady(-7)).toBe(false);
+        stack.removeAll();
+        expect(stack.preloadReady(-7)).toBe(false);
+    });
+
+    it('needs the matching key, a source event and a loaded source in every slot', () => {
+        const { map, stack, s, sess, fr } = setup();
+        fr.pre = -7;
+        syncRaw(stack, s, sess, fr);
+        map.loadedIds.add('taknz-wx-precip-b-src');
+        map.loadedIds.add('taknz-wx-clouds-b-src');
+        // loaded, but no event since the tiles changed: still the old answer
+        expect(stack.preloadReady(-7)).toBe(false);
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-precip-b-src' });
+        expect(stack.preloadReady(-7)).toBe(false);
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-clouds-b-src' });
+        expect(stack.preloadReady(-7)).toBe(true);
+        expect(stack.preloadReady(-6)).toBe(false);
+        map.loadedIds.delete('taknz-wx-clouds-b-src');
+        expect(stack.preloadReady(-7)).toBe(false);
+    });
+
+    it('a slot whose next frame is the shown frame needs nothing', () => {
+        const { map, stack, s, sess } = setup();
+        const fr: Frames = { f: 0, pre: 1 };
+        syncRaw(stack, s, sess, fr);
+        map.loadedIds.add('taknz-wx-precip-b-src');
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-precip-b-src' });
+        expect(stack.preloadReady(1)).toBe(true);
+    });
+
+    it('a new setTiles on the hidden buffer resets its readiness', () => {
+        const { map, stack, s, sess, fr } = setup();
+        s.clouds = false;
+        fr.pre = -7;
+        syncRaw(stack, s, sess, fr);
+        map.loadedIds.add('taknz-wx-precip-b-src');
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-precip-b-src' });
+        expect(stack.preloadReady(-7)).toBe(true);
+        fr.pre = -6;
+        syncRaw(stack, s, sess, fr);
+        expect(stack.preloadReady(-6)).toBe(false);
+        stack.noteMapEvent('render');
+        stack.noteMapEvent('render');
+        expect(stack.preloadReady(-6)).toBe(true);
+    });
+
+    it('after a swap the freed buffer takes the next frame and is not ready until it loads', () => {
+        const { map, stack, s, sess, fr } = setup();
+        s.clouds = false;
+        fr.pre = -7;
+        syncRaw(stack, s, sess, fr);
+        map.loadedIds.add('taknz-wx-precip-b-src');
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-precip-b-src' });
+        fr.f = -7;
+        fr.pre = -6;
+        syncRaw(stack, s, sess, fr);
+        // the hidden buffer is now `a`, freshly retargeted
+        map.loadedIds.add('taknz-wx-precip-src');
+        expect(stack.preloadReady(-6)).toBe(false);
+        stack.noteMapEvent('sourcedata', { sourceId: 'taknz-wx-precip-src' });
+        expect(stack.preloadReady(-6)).toBe(true);
+    });
+});
+
+describe('sourcesLoaded covers both buffers', () => {
+    it('is false while the hidden buffer still loads', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        s.precipRegional = true;
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        map.controlLoading();
+        map.loadedIds.add('taknz-wx-precip-src');
+        expect(stack.sourcesLoaded()).toBe(false);
+        map.loadedIds.add('taknz-wx-precip-b-src');
         expect(stack.sourcesLoaded()).toBe(true);
     });
 });
