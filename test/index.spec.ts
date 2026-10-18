@@ -19,6 +19,7 @@ import { bindStorage, flushSave, session, setFrame, setPlaying, settings, toggle
 import { togglePlay } from '../lib/player.ts';
 import { pacing } from '../lib/pacing.ts';
 import { HealthMonitor } from '../lib/health.ts';
+import { PANEL_CLOSE, PANEL_OPEN } from '../lib/panel-coordinator.ts';
 import { snapshotAt } from '../lib/time.ts';
 import { CONTROL_CLASS, CONTROL_STYLE_ID } from '../lib/constants.ts';
 import { EventedFakeMap, deferred, jsonResponse, latestBody, makeFakeApi, setRain, statusBody } from './helpers.ts';
@@ -435,6 +436,23 @@ describe('weather control and bottom bar', () => {
         expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls');
         session.health = { kind: 'ok' };
         expect(controlButton()?.title).toBe('Weather Controls');
+    });
+
+    it('names the dot state in the accessible name and the tooltip, with the health message appended', async () => {
+        await running();
+        const on = 'Weather Controls, layers on, controls hidden';
+        toggleLayer('clouds', true);
+        expect(controlButton()?.getAttribute('aria-label')).toBe(on);
+        expect(controlButton()?.title).toBe(on);
+        session.health = { kind: 'degraded', since: 0, status: 502 };
+        expect(controlButton()?.title).toBe(`${on}: Weather service unavailable`);
+        expect(controlButton()?.getAttribute('aria-label')).toBe(on);
+        session.panelOpen = true;
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls');
+        expect(controlButton()?.title).toBe('Weather Controls: Weather service unavailable');
+        session.health = { kind: 'ok' };
+        session.panelOpen = false;
+        expect(controlButton()?.title).toBe(on);
     });
 });
 
@@ -903,6 +921,18 @@ describe('timeline', () => {
             expect(session.panelOpen).toBe(true);
         });
 
+        it('leaves Escape to an open modal dialog', async () => {
+            await open();
+            const modal = document.createElement('div');
+            modal.setAttribute('aria-modal', 'true');
+            document.body.append(modal);
+            escape();
+            expect(session.panelOpen).toBe(true);
+            modal.remove();
+            escape();
+            expect(session.panelOpen).toBe(false);
+        });
+
         it('is only listening while the panel is open', async () => {
             const add = vi.spyOn(document, 'addEventListener');
             const remove = vi.spyOn(document, 'removeEventListener');
@@ -932,6 +962,134 @@ describe('timeline', () => {
             expect(session.panelOpen).toBe(true);
             session.panelOpen = false;
         });
+    });
+});
+
+describe('panel contract', () => {
+    let events: string[] = [];
+    const record = (kind: string) => (e: Event): void => {
+        const d = (e as CustomEvent<{ id: string; area: string; by?: string } | null>).detail;
+        // Only what weather sends; the test's own foreign events are not recorded.
+        if (d?.id !== 'taknz-weather') return;
+        events.push(`${kind}:${d.id}:${d.area}${d.by ? `>${d.by}` : ''}`);
+    };
+    const onOpen = record('open');
+    const onClose = record('close');
+    const foreignOpen = (id = 'rubber-sheet', extra: object = {}): void => {
+        window.dispatchEvent(new CustomEvent(PANEL_OPEN, { detail: { id, area: 'bottom', ...extra } }));
+    };
+    const dot = (): HTMLElement | null => document.querySelector('.taknz-wx-dot');
+
+    beforeEach(() => {
+        events = [];
+        window.addEventListener(PANEL_OPEN, onOpen);
+        window.addEventListener(PANEL_CLOSE, onClose);
+    });
+    afterEach(() => {
+        window.removeEventListener(PANEL_OPEN, onOpen);
+        window.removeEventListener(PANEL_CLOSE, onClose);
+    });
+
+    async function running() {
+        const fake = await install();
+        await fake.instance.enable();
+        await plugin?.pending;
+        fake.calls.length = 0;
+        events = [];
+        return fake;
+    }
+
+    it('opening the panel dispatches panel-open once', async () => {
+        await running();
+        session.panelOpen = true;
+        session.panelOpen = true;
+        expect(events).toEqual(['open:taknz-weather:bottom']);
+    });
+
+    it('closing with the button or Escape dispatches panel-close without by', async () => {
+        await running();
+        controlButton()?.click();
+        controlButton()?.click();
+        expect(events).toEqual(['open:taknz-weather:bottom', 'close:taknz-weather:bottom']);
+
+        events = [];
+        controlButton()?.click();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        expect(session.panelOpen).toBe(false);
+        expect(events).toEqual(['open:taknz-weather:bottom', 'close:taknz-weather:bottom']);
+    });
+
+    it('a panel-open from another plugin closes the open panel and says who it gave way to', async () => {
+        const { calls } = await running();
+        toggleLayer('clouds', true);
+        controlButton()?.click();
+        expect(controlButton()?.getAttribute('aria-pressed')).toBe('true');
+        expect(dot()?.style.display).toBe('none');
+        events = [];
+        calls.length = 0;
+
+        foreignOpen();
+        expect(session.panelOpen).toBe(false);
+        expect(calls).toEqual(['bottomBar.remove:taknz-weather']);
+        expect(events).toEqual(['close:taknz-weather:bottom>rubber-sheet']);
+        expect(controlButton()?.getAttribute('aria-pressed')).toBe('false');
+        expect(dot()?.style.display).toBe('');
+        expect(controlButton()?.getAttribute('aria-label')).toBe('Weather Controls, layers on, controls hidden');
+        // It does not come back by itself when the other plugin closes.
+        window.dispatchEvent(new CustomEvent(PANEL_CLOSE, { detail: { id: 'rubber-sheet', area: 'bottom' } }));
+        expect(session.panelOpen).toBe(false);
+        expect(calls).toEqual(['bottomBar.remove:taknz-weather']);
+    });
+
+    it('a panel-open from another plugin while the panel is closed does nothing', async () => {
+        const { calls } = await running();
+        foreignOpen();
+        expect(session.panelOpen).toBe(false);
+        expect(calls).toEqual([]);
+        expect(events).toEqual([]);
+    });
+
+    it('ignores its own events, other areas and malformed details', async () => {
+        const { calls } = await running();
+        session.panelOpen = true;
+        events = [];
+        calls.length = 0;
+        foreignOpen('taknz-weather');
+        foreignOpen('rubber-sheet', { area: 'top' });
+        window.dispatchEvent(new CustomEvent(PANEL_OPEN, { detail: null }));
+        window.dispatchEvent(new Event(PANEL_OPEN));
+        expect(session.panelOpen).toBe(true);
+        expect(calls).toEqual([]);
+    });
+
+    it('disable with the panel open dispatches panel-close', async () => {
+        const { instance } = await running();
+        session.panelOpen = true;
+        events = [];
+        await instance.disable();
+        expect(events).toEqual(['close:taknz-weather:bottom']);
+    });
+
+    it('disable with the panel closed dispatches nothing', async () => {
+        const { instance } = await running();
+        await instance.disable();
+        expect(events).toEqual([]);
+    });
+
+    it('ignores panel events after disable', async () => {
+        const remove = vi.spyOn(window, 'removeEventListener');
+        const { instance, calls } = await running();
+        session.panelOpen = true;
+        await instance.disable();
+        const types = remove.mock.calls.map((c) => c[0]);
+        expect(types).toContain(PANEL_OPEN);
+        expect(types).toContain(PANEL_CLOSE);
+
+        events = [];
+        calls.length = 0;
+        foreignOpen();
+        expect(events).toEqual([]);
+        expect(calls).toEqual([]);
     });
 });
 
