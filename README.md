@@ -21,9 +21,11 @@ The weather panel at the bottom of the map with Rain Global on, and the Weather 
 
 ![Weather panel and Weather Settings over New Zealand](docs/screenshots/cloudtak-plugin-weather.png)
 
-Play steps through the last 2 hours and the rain forecast, and loops.
+Play steps through the frames and loops.
 
-![Weather Play loop](docs/screenshots/cloudtak-plugin-weather-animated.gif)
+<img src="docs/screenshots/cloudtak-plugin-weather-animated.gif" alt="Weather Play loop" width="480">
+
+The animation is only 122 × 92 pixels, so it is scaled up here.
 
 ## Requirements
 
