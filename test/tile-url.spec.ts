@@ -19,8 +19,8 @@ describe('tileRequest: precip and precip-global', () => {
     });
 
     it('adds coverage=1 last when the mask is on', () => {
-        const r = tileRequest('precip', { color: 'dbz_u8', forecast: 240, snapshot: S, coverage: true });
-        expect(qs(r.query)).toBe(`layer=precip&color=dbz_u8&forecast=240&snapshot=${S}&coverage=1`);
+        const r = tileRequest('precip', { color: '9', forecast: 240, snapshot: S, coverage: true });
+        expect(qs(r.query)).toBe(`layer=precip&color=9&forecast=240&snapshot=${S}&coverage=1`);
     });
 
     it('never emits use_precip_type', () => {

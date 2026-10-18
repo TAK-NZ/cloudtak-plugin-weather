@@ -89,7 +89,7 @@ describe('loadSettings', () => {
 
     it('keeps valid stored values', () => {
         const s = { ...defaultSettings(), precipGlobal: true, precipRegional: true, clouds: true, radars: true, coverage: true, radarsPrecipType: true, tileSize: 256, timeZone: 'UTC',
-            opacity: { clouds: 0.3, 'precip-global': 0.6, precip: 0.9, radars: 0.25 }, palette: { precip: 'dbz_u8', radars: '4' } };
+            opacity: { clouds: 0.3, 'precip-global': 0.6, precip: 0.9, radars: 0.25 }, palette: { precip: '9', radars: '4' } };
         expect(loadSettings(stored(s))).toEqual(s);
     });
 
@@ -240,9 +240,14 @@ describe('settings migration', () => {
     });
 
     it('leaves non-zero chosen palettes untouched', () => {
-        expect(loadSettings(v1({ palette: { precip: '3', radars: 'dbz_u8' } })).palette).toEqual({ precip: '3', radars: 'dbz_u8' });
+        expect(loadSettings(v1({ palette: { precip: '3', radars: '9' } })).palette).toEqual({ precip: '3', radars: '9' });
     });
 
+    it('loads the removed dbz_u8 palette as the default 4', () => {
+        const store = memory(JSON.stringify({ ...defaultSettings(), palette: { precip: 'dbz_u8', radars: 'dbz_u8' } }));
+        expect(loadSettings(store).palette).toEqual({ precip: '4', radars: '4' });
+        expect(loadSettings(v1({ palette: { precip: '3', radars: 'dbz_u8' } })).palette).toEqual({ precip: '3', radars: '4' });
+    });
     it('keeps palette 0 in a version 2 object and in a version 3 object', () => {
         expect(loadSettings(v2({})).palette).toEqual({ precip: '0', radars: '0' });
         const store = memory(JSON.stringify({ ...defaultSettings(), palette: { precip: '0', radars: '0' } }));

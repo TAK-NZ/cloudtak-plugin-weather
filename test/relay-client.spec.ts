@@ -204,9 +204,9 @@ describe('tileTemplate', () => {
     });
 
     it('builds the exact string for precip-global', async () => {
-        const req = tileRequest('precip-global', { color: 'dbz_u8', forecast: 0, snapshot: 1768434600, coverage: false });
+        const req = tileRequest('precip-global', { color: '9', forecast: 0, snapshot: 1768434600, coverage: false });
         await expect(tileTemplate(host, req)).resolves.toBe(
-            'https://cot.test/api/weather/tile/{z}/{x}/{y}.png?layer=precip-global&color=dbz_u8&forecast=0&snapshot=1768434600&token=tok%2Fen%2B1'
+            'https://cot.test/api/weather/tile/{z}/{x}/{y}.png?layer=precip-global&color=9&forecast=0&snapshot=1768434600&token=tok%2Fen%2B1'
         );
     });
 
