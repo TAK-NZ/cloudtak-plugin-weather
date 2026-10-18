@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT-0
+// Tests for lib/panel-coordinator.ts; copy them together with the helper.
 import { expect, it } from 'vitest';
 import { createPanelCoordinator, PANEL_CLOSE, PANEL_OPEN } from '../lib/panel-coordinator.ts';
 import type { PanelCoordinator, PanelEventDetail } from '../lib/panel-coordinator.ts';
