@@ -68,6 +68,8 @@ export interface RasterLayerSpec {
     source: string;
     paint: {
         'raster-opacity': number;
+        /** A swap is a cut: without this MapLibre cross-fades the two buffers over 300 ms. */
+        'raster-opacity-transition': { duration: number; delay: number };
         'raster-fade-duration': number;
         'raster-resampling': 'linear';
     };
@@ -331,6 +333,9 @@ export class LayerStack {
             source: bufferSourceId(d.slot, buf),
             paint: {
                 'raster-opacity': opacity,
+                // No default 300 ms cross-fade on a swap: it showed both frames at once, and the
+                // buffer that was fading out already loaded the next frame (a ghost of n+1).
+                'raster-opacity-transition': { duration: 0, delay: 0 },
                 'raster-fade-duration': 0,
                 'raster-resampling': 'linear',
             },

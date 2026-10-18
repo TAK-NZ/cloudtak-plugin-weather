@@ -362,7 +362,7 @@ describe('LayerStack: source and layer specs', () => {
 
         const layer = map.getLayer(layerId('precip-global')) as unknown as RasterLayerSpec;
         expect(layer.type).toBe('raster');
-        expect(layer.paint).toEqual({ 'raster-opacity': 0.7, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
+        expect(layer.paint).toEqual({ 'raster-opacity': 0.7, 'raster-opacity-transition': { duration: 0, delay: 0 }, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
     });
 });
 
@@ -1015,6 +1015,36 @@ describe('Case I: double buffering', () => {
         }
     });
 
+    it('every buffer cuts between frames: raster-opacity-transition is 0 on both buffers and on re-created ones', () => {
+        const { map, stack, s, sess, fr } = freshBuf();
+        const cut = (): void => {
+            const weather = map.layers.filter((l) => l.id.startsWith(ID_PREFIX));
+            expect(weather.length).toBeGreaterThan(0);
+            for (const l of weather) expect((l as unknown as RasterLayerSpec).paint['raster-opacity-transition'], l.id).toEqual({ duration: 0, delay: 0 });
+        };
+        s.precipRegional = true;
+        s.clouds = true;
+        syncAt(stack, s, sess, fr);
+        cut();
+        // both buffers exist while the next frame loads
+        fr.pre = -7;
+        syncAt(stack, s, sess, fr);
+        expect(map.layers.some((l) => l.id === 'taknz-wx-precip-b')).toBe(true);
+        cut();
+        // swap to the preloaded frame, then preload again into the buffer that was swapped out
+        fr.f = -7;
+        fr.pre = -6;
+        syncAt(stack, s, sess, fr);
+        cut();
+        // a tile size change re-creates every layer
+        s.tileSize = 256;
+        syncAt(stack, s, sess, fr);
+        cut();
+        fr.pre = -5;
+        syncAt(stack, s, sess, fr);
+        cut();
+    });
+
     it('creates the hidden buffer above the visible one with the same options, at HIDDEN_OPACITY', () => {
         const { map, stack, s, sess, fr } = freshBuf();
         s.precipRegional = true;
@@ -1026,7 +1056,7 @@ describe('Case I: double buffering', () => {
         const b = map.getSource('taknz-wx-precip-b-src')?.spec as RasterSourceSpec;
         expect({ ...b, tiles: a.tiles }).toEqual(a);
         expect(b.attribution).toBe(ATTRIBUTION);
-        expect(map.getLayer('taknz-wx-precip-b')?.paint).toEqual({ 'raster-opacity': 0, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
+        expect(map.getLayer('taknz-wx-precip-b')?.paint).toEqual({ 'raster-opacity': 0, 'raster-opacity-transition': { duration: 0, delay: 0 }, 'raster-fade-duration': 0, 'raster-resampling': 'linear' });
         const ids = map.layers.map((l) => l.id);
         expect(ids.indexOf('taknz-wx-precip-b')).toBe(ids.indexOf('taknz-wx-precip') + 1);
         expect(ids[ids.indexOf('taknz-wx-precip-b') + 1]).toBe('mf-polygons');
