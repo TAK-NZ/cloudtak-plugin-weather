@@ -63,21 +63,21 @@
                 :style='markStyle'
             />
         </div>
-        <!-- The label box is as wide as its text but never narrower than 7.5rem, so the zone is never cut. -->
+        <!--
+            The label box is as wide as its text but never narrower than the widest label (-120 min, +240 min)
+            with a 4 letter zone, so the zone is never cut and the slider does not change width while it is dragged.
+        -->
         <div
-            class='d-flex align-items-center flex-shrink-0'
-            style='flex: 0 0 auto; min-width: 7.5rem;'
+            class='d-flex align-items-center flex-shrink-0 taknz-wx-label-box'
             data-test='label-box'
         >
             <span
-                class='text-nowrap'
-                style='font-size: 0.8125rem; font-variant-numeric: tabular-nums;'
+                class='text-nowrap taknz-wx-label'
                 data-test='label'
                 :title='label.title'
             >
                 <span v-text='label.base' />{{ ' ' }}<span
-                    class='flex-shrink-0 text-secondary'
-                    style='font-size: 0.75rem;'
+                    class='flex-shrink-0 text-secondary taknz-wx-zone'
                     data-test='label-zone'
                     v-text='label.zone'
                 />
@@ -190,8 +190,28 @@ onBeforeUnmount(() => {
 .taknz-wx-play[aria-pressed='true'] {
     color: var(--tblr-primary, #4f8cff);
 }
+.taknz-wx-label-box {
+    flex: 0 0 auto;
+    min-width: 9.5rem;
+}
+.taknz-wx-label {
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+}
+.taknz-wx-zone {
+    font-size: 0.75rem;
+}
 /* Narrow phones: keep the slider at 96 px or more with the Play button added. */
 @media (max-width: 419px) {
+    .taknz-wx-label-box {
+        min-width: 8.75rem;
+    }
+    .taknz-wx-label {
+        font-size: 0.75rem;
+    }
+    .taknz-wx-zone {
+        font-size: 0.6875rem;
+    }
     .taknz-wx-play {
         width: 40px;
         flex-basis: 40px;
