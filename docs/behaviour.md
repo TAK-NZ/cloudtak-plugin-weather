@@ -29,6 +29,7 @@ Operational detail that the [README](../README.md) leaves out.
 
 * Play loads the next frame while the current one is shown, and only that one.
 * The first pass over the frames loads every visible tile of every layer that is on (about 20 tiles per layer and frame on a 1900 by 1400 screen), and the plugin paces it to about 180 tiles a minute so the relay limits are not hit.
+* The frame on screen counts too. Switching a layer on, or moving the slider, is paid for when those tiles load, so pressing Play straight afterwards waits a little longer before it loads its second frame. That is what keeps any minute at 270 tiles or less, the frame you were looking at included.
 * With several layers on, the first pass can therefore take minutes (about 6 with Clouds, Rain Regional and Radar and the forecast on a 1900 by 1400 screen). While Play waits, the time label stays on the frame that is shown.
 * The second pass is served from the browser cache and runs at full speed.
 * **Sharper** tiles need about four times as many requests, so with several layers on the pacing may not be enough to stay under the relay limit. Play then pauses as described under Play.

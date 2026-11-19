@@ -1187,6 +1187,8 @@ describe('play', () => {
             toggleLayer('clouds', true);
             setRain('precip-global');
         });
+        // Idle for a minute, so the Now frame that the layers loaded has long been paid off
+        await vi.advanceTimersByTimeAsync(60_000);
         togglePlay();
         await vi.advanceTimersByTimeAsync(0);
         // 2 layers x 20 tiles: the first frame and the preload of -11 fit into the burst of 90
@@ -1206,7 +1208,45 @@ describe('play', () => {
         expect(session.frame).toBe(-10);
         expect(map.counters.moveLayer).toBe(0);
     });
-
+    it('with pacing on, the Now frame the layers just loaded is charged, so Play started right after waits for it', async () => {
+        pacing.enabled = true;
+        const map = await begin(() => {
+            toggleLayer('clouds', true);
+            setRain('precip-global');
+        });
+        // No idle time: the Now frame (2 x 20 tiles) was fetched a moment ago and used 40 of the burst of 90
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        // The first frame costs 40 and leaves 10, so the preload of -11 (40) must wait about 10 s
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).hidden)).not.toBe(-11);
+        await step(map, 8000);
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).hidden)).not.toBe(-11);
+        await step(map, 2500);
+        expect(frameOf(buffers(map).hidden)).toBe(-11);
+        // The wait is what keeps any 60 s window at 270 tiles or less, Now frame included
+        expect(session.frame).toBe(-12);
+    });
+    it('a layer switched on while Play is paused is charged when it loads, not again when Play starts', async () => {
+        pacing.enabled = true;
+        const map = await begin(() => {
+            toggleLayer('clouds', true);
+        });
+        await vi.advanceTimersByTimeAsync(60_000);
+        // A second layer: its Now tiles (20) are fetched now
+        setRain('precip-global');
+        await vi.advanceTimersByTimeAsync(0);
+        await flushPromises();
+        togglePlay();
+        await vi.advanceTimersByTimeAsync(0);
+        // Burst 90: switching Rain on took 20, the first frame takes 40, which leaves 30; the preload of -11
+        // (40) needs about 3 s more
+        expect(session.frame).toBe(-12);
+        expect(frameOf(buffers(map).hidden)).not.toBe(-11);
+        await step(map, 4000);
+        expect(frameOf(buffers(map).hidden)).toBe(-11);
+    });
     it('holds on Now, then restarts at -12', async () => {
         const map = await begin();
         togglePlay();

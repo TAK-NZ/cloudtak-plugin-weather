@@ -62,6 +62,8 @@ interface Activation {
     yielding: boolean;
     stack?: LayerStack;
     player?: Player;
+    /** Paces the loading of frames (lib/pacing.ts). Shared by Play and the layer sync, so both are charged. */
+    pace?: NonNullable<PlayerDeps['pace']>;
     monitor: HealthMonitor;
     /** Tile URLs currently on the map, per slot. */
     applied: Partial<Record<LayerSlot, string>>;
@@ -445,7 +447,7 @@ export default class WeatherPlugin implements PluginInstance {
                 });
             },
             preloadReady: (key) => act.stack?.preloadReady(key) ?? false,
-            pace: this.makePacer(act),
+            pace: (act.pace ??= this.makePacer(act)),
             now: () => Date.now(),
             setTimer: (fn, ms) => setTimeout(fn, ms),
             clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -590,6 +592,11 @@ export default class WeatherPlugin implements PluginInstance {
         try {
             act.stack.sync(computeDesired(settings, session, tiles, preload));
             act.applied = { ...tiles };
+            // The frame on screen has just been requested, whoever asked for it (a layer switched
+            // on, the slider, a restored selection). Charging it now, when the tiles are fetched,
+            // keeps the relay's per-minute count honest for a Play that starts right afterwards.
+            // Charging is idempotent per request, so the frames Play charges itself are not paid twice.
+            if (!act.queued) act.pace?.charge(session.frame);
         } catch (err) {
             console.error('[weather] Could not update the weather layers', err);
         }
